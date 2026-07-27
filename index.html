@@ -368,12 +368,44 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .step.done .stepno{background:var(--brand);border-color:var(--brand);color:#fff;font-size:15px}
 .step.done .steptext{color:var(--muted);text-decoration:line-through}
 
+/* ---------- ingredient suggestions ---------- */
+.sugg{position:relative;margin-bottom:8px}
+.sugg input{width:100%}
+.sugglist{
+  position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:30;
+  background:var(--card);border:1.5px solid var(--line);border-radius:var(--r);
+  box-shadow:0 10px 26px rgba(19,34,29,.14);overflow:hidden;
+  max-height:280px;overflow-y:auto;
+}
+.suggitem{
+  display:flex;align-items:baseline;gap:10px;width:100%;
+  background:none;border:0;border-bottom:1px solid var(--line);
+  padding:10px 12px;cursor:pointer;text-align:left;font:inherit;
+}
+.suggitem:last-child{border-bottom:0}
+.suggitem:hover{background:#EDF1EC}
+.suggname{flex:1;font-size:15.5px;color:var(--ink)}
+.suggaisle{
+  font-family:var(--sign);font-weight:600;text-transform:uppercase;
+  letter-spacing:.08em;font-size:11px;color:var(--muted);
+}
+.suggnew{background:#FBF4E2}
+.suggnew:hover{background:#F7EDD2}
+.suggnew .suggname{color:#5C4409}
+
+.notice.quiet{border-color:var(--line);background:#EDF1EC}
+
 /* ---------- pantry ---------- */
 .panrow{
   display:grid;grid-template-columns:1fr auto 74px 82px 30px;gap:9px;
   align-items:center;padding:10px 3px;border-bottom:1px solid var(--line);
 }
-.panname{font-size:16px;line-height:1.25}
+.panname{
+  font-size:16px;line-height:1.25;text-align:left;
+  background:none;border:0;padding:0;cursor:pointer;font-family:inherit;
+  color:var(--ink);
+}
+.panname:hover{color:var(--brand);text-decoration:underline}
 .panrow.status-out .panname{color:var(--muted)}
 .panqty,.panunit{padding:7px 8px;font-size:14px}
 .panqty{text-align:center;font-family:var(--num)}

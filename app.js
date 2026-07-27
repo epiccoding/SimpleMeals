@@ -1565,6 +1565,217 @@ const STATUS = [
   { key: "out", label: "out" },
 ];
 
+/**
+ * A text box that keeps steering toward names already in the shared
+ * registry. Creating something new stays possible — it's just one extra
+ * deliberate click, which is enough to stop "bananas", "banana" and
+ * "ripe bananas" all existing side by side.
+ */
+function IngredientBox({ catalog, value, onChange, onPick, onCreate,
+                         placeholder, exclude, busy }) {
+  const [open, setOpen] = useState(false);
+  const q = value.trim().toLowerCase();
+
+  const matches = useMemo(() => {
+    if (!q) return [];
+    return catalog
+      .filter((c) => c.id !== exclude && c.name.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const sa = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const sbb = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        if (sa !== sbb) return sa - sbb;
+        return a.name.length - b.name.length;
+      })
+      .slice(0, 8);
+  }, [catalog, q, exclude]);
+
+  const exact = !!q && catalog.some((c) => c.name.toLowerCase() === q);
+  const show = open && !!q;
+
+  return html`
+    <div class="sugg">
+      <input type="text" value=${value} placeholder=${placeholder}
+        onInput=${(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus=${() => setOpen(true)}
+        onKeyDown=${(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (matches.length && !exact) onPick(matches[0]);
+            else onCreate?.(value);
+            setOpen(false);
+          } else if (e.key === "Escape") setOpen(false);
+        }} />
+      ${show && html`
+        <div class="sugglist">
+          ${matches.map((c) => html`
+            <button type="button" class="suggitem" key=${c.id}
+              onClick=${() => { onPick(c); setOpen(false); }}>
+              <span class="suggname">${c.name}</span>
+              <span class="suggaisle">${c.aisle}</span>
+            </button>`)}
+          ${!exact && html`
+            <button type="button" class="suggitem suggnew" disabled=${busy}
+              onClick=${() => { onCreate?.(value); setOpen(false); }}>
+              <span class="suggname">Add “${value.trim()}” as something new</span>
+              <span class="suggaisle">
+                ${matches.length ? "not one of the above" : "nothing similar found"}
+              </span>
+            </button>`}
+        </div>`}
+    </div>`;
+}
+
+/* ============================================================
+   Fixing an ingredient
+   ============================================================ */
+
+function IngredientEditor({ item, catalog, onClose, onDone }) {
+  const ing = item.ing;
+  const [name, setName] = useState(ing.name);
+  const [aisle, setAisle] = useState(ing.aisle);
+  const [canon, setCanon] = useState(ing.canonical_unit);
+  const [perMl, setPerMl] = useState(ing.grams_per_ml ?? "");
+  const [perCount, setPerCount] = useState(ing.grams_per_count ?? "");
+  const [usage, setUsage] = useState(null);
+  const [mergeText, setMergeText] = useState("");
+  const [mergeTarget, setMergeTarget] = useState(null);
+  const [saving, setSaving] = useState("");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    sb.rpc("ingredient_usage", { p_id: ing.id })
+      .then(({ data }) => setUsage(data));
+  }, [ing.id]);
+
+  const clash = catalog.find((c) =>
+    c.id !== ing.id && c.name.toLowerCase() === name.trim().toLowerCase());
+
+  const saveEdits = async () => {
+    if (!name.trim()) { setErr("Needs a name."); return; }
+    if (clash) {
+      setErr(`“${clash.name}” already exists. Use “Same as something else” ` +
+             `below to merge them instead.`);
+      return;
+    }
+    setSaving("edit"); setErr("");
+    const { error } = await sb.from("ingredients").update({
+      name: name.trim().toLowerCase(),
+      aisle,
+      canonical_unit: canon,
+      grams_per_ml: toNumber(perMl),
+      grams_per_count: toNumber(perCount),
+    }).eq("id", ing.id);
+    setSaving("");
+    if (error) { setErr(error.message); return; }
+    onDone();
+  };
+
+  const doMerge = async () => {
+    if (!mergeTarget) return;
+    if (!confirm(`Merge “${ing.name}” into “${mergeTarget.name}”? ` +
+                 `Every recipe, pantry and list using it will switch over, ` +
+                 `and “${ing.name}” will be deleted. This can't be undone.`)) return;
+    setSaving("merge"); setErr("");
+    const { error } = await sb.rpc("merge_ingredients", {
+      p_from: ing.id, p_into: mergeTarget.id,
+    });
+    setSaving("");
+    if (error) { setErr(error.message); return; }
+    onDone();
+  };
+
+  const shared = usage && (usage.recipes > 1 || usage.households > 1);
+
+  return html`
+    <${Sheet} title="Fix ingredient" onClose=${onClose}>
+      ${usage && html`
+        <div class=${"notice" + (shared ? "" : " quiet")}>
+          Ingredients are shared, so this affects everyone using it —
+          ${usage.recipes} ${usage.recipes === 1 ? "recipe" : "recipes"},
+          ${usage.households} ${usage.households === 1 ? "pantry" : "pantries"}.
+        </div>`}
+
+      <label class="field" style="margin-top:14px">
+        <span>Name</span>
+        <input type="text" value=${name}
+          onInput=${(e) => setName(e.target.value)} />
+      </label>
+      ${clash && html`
+        <p class="small" style="margin:-6px 0 12px;color:var(--danger)">
+          “${clash.name}” already exists — merge below rather than renaming.
+        </p>`}
+
+      <div class="row wrap" style="gap:12px">
+        <label class="field" style="margin:0;flex:1;min-width:150px">
+          <span>Aisle</span>
+          <select value=${aisle} onChange=${(e) => setAisle(e.target.value)}>
+            ${[...new Set([aisle, "Produce", "Meat", "Seafood", "Dairy",
+              "Bakery", "Frozen", "Pantry", "Baking", "Spices", "Beverages",
+              "Household", "Other"])].map((a) =>
+              html`<option value=${a}>${a}</option>`)}
+          </select>
+        </label>
+        <label class="field" style="margin:0;width:130px">
+          <span>Measured in</span>
+          <select value=${canon} onChange=${(e) => setCanon(e.target.value)}>
+            <option value="count">count</option>
+            <option value="g">grams</option>
+            <option value="ml">millilitres</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="small muted" style="margin:6px 0 14px">
+        Changing what something's measured in re-reads every existing amount
+        for it, so only do that if it's plainly wrong — salt recorded in
+        millilitres, say.
+      </p>
+
+      <div class="row wrap" style="gap:12px">
+        <label class="field" style="margin:0;flex:1;min-width:150px">
+          <span>Grams per ml</span>
+          <input type="text" value=${perMl} placeholder="e.g. 0.53 for flour"
+            onInput=${(e) => setPerMl(e.target.value)} />
+        </label>
+        <label class="field" style="margin:0;flex:1;min-width:150px">
+          <span>Grams each</span>
+          <input type="text" value=${perCount} placeholder="e.g. 50 for an egg"
+            onInput=${(e) => setPerCount(e.target.value)} />
+        </label>
+      </div>
+      <p class="small muted" style="margin:6px 0 18px">
+        Filling these in is what lets cups and tablespoons add up with
+        ounces on the shopping list. Leave blank if you don't know.
+      </p>
+
+      <${Problem} text=${err} />
+      <div class="row" style="margin-bottom:22px">
+        <button class="btn" disabled=${!!saving} onClick=${saveEdits}>
+          ${saving === "edit" ? "Saving…" : "Save changes"}
+        </button>
+        <button class="btn ghost" onClick=${onClose}>Cancel</button>
+      </div>
+
+      <h2 class="sign" style="font-size:17px;margin:0 0 8px">Same as something else</h2>
+      <p class="small muted" style="margin:0 0 10px">
+        If this turned out to be a duplicate, merge it. Everything pointing
+        here moves across, and this one disappears.
+      </p>
+      <${IngredientBox} catalog=${catalog} value=${mergeText}
+        exclude=${ing.id}
+        placeholder="Which one is it really?"
+        onChange=${(v) => { setMergeText(v); setMergeTarget(null); }}
+        onPick=${(c) => { setMergeTarget(c); setMergeText(c.name); }} />
+      ${mergeTarget && html`
+        <button class="btn" style="margin-top:12px" disabled=${!!saving}
+          onClick=${doMerge}>
+          ${saving === "merge"
+            ? "Merging…"
+            : `Merge into “${mergeTarget.name}”`}
+        </button>`}
+    <//>`;
+}
+
 /** Anything not marked "out" counts as something you can cook with. */
 function haveIt(item) {
   return !!item && item.status !== "out";
@@ -1588,6 +1799,7 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
+  const [fixing, setFixing] = useState(null);
 
   const items = useMemo(() => {
     const list = [...pantry.values()].map((p) => ({
@@ -1611,8 +1823,27 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
       (rank.get(a[0]) ?? 500) - (rank.get(b[0]) ?? 500));
   }, [items, aisles]);
 
-  const add = async () => {
-    const text = adding.trim();
+  const addExisting = async (ing) => {
+    setBusy(true); setErr("");
+    try {
+      const { error } = await sb.from("pantry_items").upsert({
+        household_id: household.id,
+        ingredient_id: ing.id,
+        status: "plenty",
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "household_id,ingredient_id" });
+      if (error) throw error;
+      setAdding("");
+      reload();
+    } catch (e) {
+      setErr(e.message || "Couldn't add that.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = async (raw) => {
+    const text = (raw ?? adding).trim();
     if (!text) return;
     setBusy(true); setErr("");
     try {
@@ -1690,13 +1921,11 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
       </div>
 
       ${view === "have" ? html`
-        <div class="row" style="margin-bottom:8px">
-          <input type="text" value=${adding}
-            placeholder="Add what you've got — “2 lb flour” or just “paprika”"
-            onInput=${(e) => setAdding(e.target.value)}
-            onKeyDown=${(e) => e.key === "Enter" && add()} />
-          <button class="btn sm" disabled=${busy} onClick=${add}>Add</button>
-        </div>
+        <${IngredientBox} catalog=${catalog} value=${adding} busy=${busy}
+          placeholder="Add what you've got — “2 lb flour” or just “paprika”"
+          onChange=${setAdding}
+          onPick=${addExisting}
+          onCreate=${(v) => add(v)} />
         <${Problem} text=${err} />
 
         ${pantry.size > 8 && html`
@@ -1719,7 +1948,10 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
               </div>
               ${rows.map((it) => html`
                 <div class=${"panrow status-" + it.status} key=${it.id}>
-                  <span class="panname">${it.ing.name}</span>
+                  <button class="panname" onClick=${() => setFixing(it)}
+                    title="Fix the name, aisle or conversions">
+                    ${it.ing.name}
+                  </button>
                   <span class="statusgroup">
                     ${STATUS.map((s) => html`
                       <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
@@ -1734,7 +1966,7 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
                     <option value="">—</option>
                     ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
                   </select>
-                  <button class="btn quiet" title="Remove"
+                  <button class="btn quiet" title="Take out of the pantry"
                     onClick=${() => drop(it)}>×</button>
                 </div>`)}
             </div>`)}
@@ -1771,6 +2003,10 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
               </div>`)}
           `}
       `}
+
+      ${fixing && html`<${IngredientEditor} item=${fixing} catalog=${catalog}
+        onClose=${() => setFixing(null)}
+        onDone=${() => { setFixing(null); reload(); }} />`}
     </div>`;
 }
 
