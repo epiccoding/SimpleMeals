@@ -1800,6 +1800,13 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
   const [fixing, setFixing] = useState(null);
+  const [layout, setLayout] = useState(
+    () => localStorage.getItem("sm-pantry-view") || "rows");
+
+  const setLayoutSticky = (v) => {
+    setLayout(v);
+    try { localStorage.setItem("sm-pantry-view", v); } catch { /* private mode */ }
+  };
 
   const items = useMemo(() => {
     const list = [...pantry.values()].map((p) => ({
@@ -1929,10 +1936,18 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
         <${Problem} text=${err} />
 
         ${pantry.size > 8 && html`
-          <input class="picksearch" type="text" value=${search}
-            placeholder="Find something in the pantry"
-            onInput=${(e) => setSearch(e.target.value)}
-            style="margin:10px 0 4px" />`}
+          <div class="row wrap" style="margin:10px 0 4px;gap:8px">
+            <input class="picksearch" type="text" value=${search}
+              placeholder="Find something in the pantry"
+              onInput=${(e) => setSearch(e.target.value)}
+              style="flex:1;min-width:180px" />
+            <span class="viewswap">
+              <button class=${layout === "rows" ? "on" : ""}
+                onClick=${() => setLayoutSticky("rows")}>Rows</button>
+              <button class=${layout === "cards" ? "on" : ""}
+                onClick=${() => setLayoutSticky("cards")}>Cards</button>
+            </span>
+          </div>`}
 
         ${!pantry.size
           ? html`<div class="empty">
@@ -1946,29 +1961,59 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
                 <span class="name">${aisle}</span>
                 <span class="count num">${rows.length}</span>
               </div>
-              ${rows.map((it) => html`
-                <div class=${"panrow status-" + it.status} key=${it.id}>
-                  <button class="panname" onClick=${() => setFixing(it)}
-                    title="Fix the name, aisle or conversions">
-                    ${it.ing.name}
-                  </button>
-                  <span class="statusgroup">
-                    ${STATUS.map((s) => html`
-                      <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
-                        onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
-                  </span>
-                  <input class="panqty" type="text" value=${it.quantity ?? ""}
-                    placeholder="amount"
-                    onBlur=${(e) => setAmount(it, e.target.value)}
-                    onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
-                  <select class="panunit" value=${it.unit || ""}
-                    onChange=${(e) => setUnit(it, e.target.value || null)}>
-                    <option value="">—</option>
-                    ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
-                  </select>
-                  <button class="btn quiet" title="Take out of the pantry"
-                    onClick=${() => drop(it)}>×</button>
-                </div>`)}
+
+              ${layout === "cards"
+                ? html`
+                  <div class="pangrid">
+                    ${rows.map((it) => html`
+                      <div class=${"pancard status-" + it.status} key=${it.id}>
+                        <button class="kill" title="Take out of the pantry"
+                          onClick=${() => drop(it)}>×</button>
+                        <button class="panname" onClick=${() => setFixing(it)}
+                          title="Fix the name, aisle or conversions">
+                          ${it.ing.name}
+                        </button>
+                        <div class="amountrow">
+                          <input class="panqty" type="text" value=${it.quantity ?? ""}
+                            placeholder="amount"
+                            onBlur=${(e) => setAmount(it, e.target.value)}
+                            onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                          <select class="panunit" value=${it.unit || ""}
+                            onChange=${(e) => setUnit(it, e.target.value || null)}>
+                            <option value="">—</option>
+                            ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                          </select>
+                        </div>
+                        <span class="statusgroup">
+                          ${STATUS.map((s) => html`
+                            <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
+                              onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
+                        </span>
+                      </div>`)}
+                  </div>`
+                : rows.map((it) => html`
+                  <div class=${"panrow status-" + it.status} key=${it.id}>
+                    <button class="panname" onClick=${() => setFixing(it)}
+                      title="Fix the name, aisle or conversions">
+                      ${it.ing.name}
+                    </button>
+                    <span class="statusgroup">
+                      ${STATUS.map((s) => html`
+                        <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
+                          onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
+                    </span>
+                    <input class="panqty" type="text" value=${it.quantity ?? ""}
+                      placeholder="amount"
+                      onBlur=${(e) => setAmount(it, e.target.value)}
+                      onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                    <select class="panunit" value=${it.unit || ""}
+                      onChange=${(e) => setUnit(it, e.target.value || null)}>
+                      <option value="">—</option>
+                      ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                    </select>
+                    <button class="btn quiet" title="Take out of the pantry"
+                      onClick=${() => drop(it)}>×</button>
+                  </div>`)}
             </div>`)}
       ` : html`
         ${!pantry.size
