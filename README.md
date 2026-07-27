@@ -56,11 +56,3 @@ Never put a `service_role` or `secret` key in this repo. Those bypass RLS.
 
 Anyone holding a household's invite code gets full read/write on that
 household. Treat it like a password rather than a username.
-
-## Not built yet
-
-- **Calendar feed.** A Supabase Edge Function serving `text/calendar` at a
-  per-household token URL, so Apple/Google/Outlook can subscribe. One-way,
-  app → calendar. `households.ics_token` already exists for this.
-- **Leaving a household**, and switching between more than one.
-- **Recipe import** from a URL.
