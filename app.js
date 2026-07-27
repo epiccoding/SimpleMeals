@@ -50,31 +50,58 @@ function trim(n) {
   return String(Math.round(n * 100) / 100);
 }
 
-/** Render a canonical quantity in units a person would shop in. */
+/**
+ * How to present a canonical quantity. Everything is stored in grams,
+ * millilitres, or counts; these decide what a person reads on the list.
+ */
+const SYSTEMS = [
+  { key: "us-cups", label: "Cups, ounces & pounds" },
+  { key: "us-oz", label: "Ounces & fluid ounces" },
+  { key: "metric", label: "Grams & millilitres" },
+  { key: "metric-scaled", label: "Grams, kilos & litres" },
+];
+
+// Older builds stored just "us" or "metric".
+function normaliseSystem(key) {
+  if (key === "us") return "us-cups";
+  if (key === "metric") return "metric-scaled";
+  return SYSTEMS.some((s) => s.key === key) ? key : "us-cups";
+}
+
 function showQty(qty, canonUnit, system) {
   const q = Number(qty);
   if (canonUnit === "count") return { n: String(Math.ceil(q - 0.001)), u: "" };
 
-  if (system === "metric") {
-    if (canonUnit === "g") {
-      return q >= 1000
-        ? { n: trim(q / 1000), u: "kg" }
-        : { n: String(Math.round(q)), u: "g" };
-    }
-    return q >= 1000
-      ? { n: trim(q / 1000), u: "L" }
-      : { n: String(Math.round(q)), u: "ml" };
-  }
+  const isMass = canonUnit === "g";
 
-  if (canonUnit === "g") {
-    const oz = q / MASS.oz;
-    if (oz >= 16) return { n: trim(Math.round((oz / 16) * 20) / 20), u: "lb" };
-    if (oz >= 1) return { n: frac(oz), u: "oz" };
-    return { n: String(Math.round(q)), u: "g" };
+  switch (system) {
+    case "us-oz":
+      if (isMass) return { n: frac(q / MASS.oz), u: "oz" };
+      // Below half a fluid ounce, spoons read better than fractions of one.
+      if (q < VOL.floz / 2) return { n: frac(q / VOL.tsp), u: "tsp" };
+      return { n: frac(q / VOL.floz), u: "fl oz" };
+
+    case "metric":
+      return { n: String(Math.round(q)), u: isMass ? "g" : "ml" };
+
+    case "metric-scaled":
+      if (q >= 1000) {
+        return { n: trim(q / 1000), u: isMass ? "kg" : "L" };
+      }
+      return { n: String(Math.round(q)), u: isMass ? "g" : "ml" };
+
+    case "us-cups":
+    default:
+      if (isMass) {
+        const oz = q / MASS.oz;
+        if (oz >= 16) return { n: trim(Math.round((oz / 16) * 20) / 20), u: "lb" };
+        if (oz >= 1) return { n: frac(oz), u: "oz" };
+        return { n: String(Math.round(q)), u: "g" };
+      }
+      if (q >= VOL.cup * 0.75) return { n: frac(q / VOL.cup), u: "cup" };
+      if (q >= VOL.tbsp) return { n: frac(q / VOL.tbsp), u: "tbsp" };
+      return { n: frac(q / VOL.tsp), u: "tsp" };
   }
-  if (q >= VOL.cup * 0.75) return { n: frac(q / VOL.cup), u: "cup" };
-  if (q >= VOL.tbsp) return { n: frac(q / VOL.tbsp), u: "tbsp" };
-  return { n: frac(q / VOL.tsp), u: "tsp" };
 }
 
 /**
@@ -1556,6 +1583,68 @@ function RecipePicker({ recipes, recency, value, onPick }) {
 }
 
 /* ============================================================
+   Quick pantry edit — status, amount, remove. The full name/aisle/
+   conversion editor is one click further, since that's rarer to need.
+   ============================================================ */
+
+function PantryQuickEdit({ item, buckets, onClose, onFix, onStatus, onAmount,
+                          onUnit, onDrop, onLocation }) {
+  const [qty, setQty] = useState(item.quantity ?? "");
+  const [unit, setUnit] = useState(item.unit || "");
+
+  return html`
+    <${Sheet} title=${item.ing.name} onClose=${onClose}>
+      <p class="sign muted" style="font-size:12px;margin:-6px 0 8px">
+        ${item.ing.aisle}
+      </p>
+
+      <span class="statusgroup" style="width:100%;margin-bottom:16px">
+        ${STATUS.map((s) => html`
+          <button class=${"statusbtn" + (item.status === s.key ? " on" : "")}
+            style="flex:1"
+            onClick=${() => onStatus(item, s.key)}>${s.label}</button>`)}
+      </span>
+
+      <label class="field">
+        <span>Where it lives</span>
+        <select value=${item.location || "Other"}
+          onChange=${(e) => onLocation(item, e.target.value)}>
+          ${buckets.map((b) => html`<option value=${b}>${b}</option>`)}
+        </select>
+      </label>
+
+      <div class="row wrap" style="gap:10px">
+        <label class="field" style="margin:0;flex:1;min-width:120px">
+          <span>Amount</span>
+          <input type="text" value=${qty} placeholder="optional"
+            onInput=${(e) => setQty(e.target.value)}
+            onBlur=${() => onAmount(item, qty)}
+            onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+        </label>
+        <label class="field" style="margin:0;width:120px">
+          <span>Unit</span>
+          <select value=${unit}
+            onChange=${(e) => { setUnit(e.target.value); onUnit(item, e.target.value || null); }}>
+            <option value="">—</option>
+            ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+          </select>
+        </label>
+      </div>
+
+      <div class="row" style="margin-top:20px">
+        <button class="btn ghost sm" onClick=${() => onFix(item)}>
+          Rename, change aisle, or fix conversion
+        </button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn quiet" onClick=${() => { onDrop(item); onClose(); }}>
+          Take out of the pantry
+        </button>
+      </div>
+    <//>`;
+}
+
+/* ============================================================
    Pantry
    ============================================================ */
 
@@ -1793,20 +1882,19 @@ function coverage(recipe, pantry) {
   return { total: lines.length, missing, low, has: lines.length - missing.length };
 }
 
-function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reload, onPlan }) {
+function PantryTab({ household, pantry, catalog, locations, recipes, recency,
+                    reload, onPlan }) {
   const [view, setView] = useState("have");
   const [adding, setAdding] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
   const [fixing, setFixing] = useState(null);
-  const [layout, setLayout] = useState(
-    () => localStorage.getItem("sm-pantry-view") || "rows");
-
-  const setLayoutSticky = (v) => {
-    setLayout(v);
-    try { localStorage.setItem("sm-pantry-view", v); } catch { /* private mode */ }
-  };
+  const [detail, setDetail] = useState(null);
+  const [editingBuckets, setEditingBuckets] = useState(false);
+  const [newBucket, setNewBucket] = useState("");
+  const [dragOver, setDragOver] = useState(null);
+  const [dragging, setDragging] = useState(null);
 
   const items = useMemo(() => {
     const list = [...pantry.values()].map((p) => ({
@@ -1817,18 +1905,21 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
     return q ? list.filter((p) => p.ing.name.toLowerCase().includes(q)) : list;
   }, [pantry, catalog, search]);
 
-  const grouped = useMemo(() => {
+  // "Other" is never a physical row — it's synthesized so it can never be
+  // deleted or duplicated, and it's always the last bucket.
+  const bucketNames = useMemo(() =>
+    [...locations.map((l) => l.name), "Other"], [locations]);
+
+  const bucketed = useMemo(() => {
     const m = new Map();
+    for (const name of bucketNames) m.set(name, []);
     for (const it of items) {
-      const aisle = it.ing.aisle || "Other";
-      if (!m.has(aisle)) m.set(aisle, []);
-      m.get(aisle).push(it);
+      const loc = m.has(it.location) ? it.location : "Other";
+      m.get(loc).push(it);
     }
     for (const rows of m.values()) rows.sort((a, b) => a.ing.name.localeCompare(b.ing.name));
-    const rank = new Map(aisles.map((a) => [a.name, a.sort_order]));
-    return [...m.entries()].sort((a, b) =>
-      (rank.get(a[0]) ?? 500) - (rank.get(b[0]) ?? 500));
-  }, [items, aisles]);
+    return m;
+  }, [items, bucketNames]);
 
   const addExisting = async (ing) => {
     setBusy(true); setErr("");
@@ -1897,9 +1988,74 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
     reload();
   };
 
+  const setLocation = async (item, location) => {
+    await sb.from("pantry_items")
+      .update({ location, updated_at: new Date().toISOString() })
+      .eq("id", item.id);
+    reload();
+  };
+
   const drop = async (item) => {
     await sb.from("pantry_items").delete().eq("id", item.id);
     reload();
+  };
+
+  /* ---- buckets ---- */
+
+  const addBucket = async () => {
+    const name = newBucket.trim();
+    if (!name) return;
+    if (name.toLowerCase() === "other") {
+      setErr("That's already the default — pick a different name.");
+      return;
+    }
+    setErr("");
+    const { error } = await sb.from("pantry_locations")
+      .insert({ household_id: household.id, name,
+        sort_order: locations.length ? Math.max(...locations.map((l) => l.sort_order)) + 10 : 10 });
+    if (error && error.code !== "23505") { setErr(error.message); return; }
+    setNewBucket("");
+    reload();
+  };
+
+  const renameBucket = async (oldName, newName) => {
+    const clean = newName.trim();
+    if (!clean || clean === oldName) return;
+    const { error } = await sb.rpc("rename_pantry_location", {
+      p_household: household.id, p_old: oldName, p_new: clean,
+    });
+    if (error) { setErr(error.message); return; }
+    reload();
+  };
+
+  const removeBucket = async (name) => {
+    if (!confirm(`Remove "${name}"? Anything in it moves back to Other.`)) return;
+    const { error } = await sb.rpc("delete_pantry_location", {
+      p_household: household.id, p_name: name,
+    });
+    if (error) { setErr(error.message); return; }
+    reload();
+  };
+
+  /* ---- drag and drop ----
+     Desktop only — iOS and Android Safari/Chrome don't support HTML5
+     drag-and-drop on arbitrary elements, only on links and images. On a
+     phone, the same move happens through the Location dropdown inside
+     the tap-to-open popover instead, so nothing is drag-only. */
+
+  const dragItem = (e, item) => {
+    e.dataTransfer.setData("text/plain", item.id);
+    e.dataTransfer.effectAllowed = "move";
+    setDragging(item.id);
+  };
+
+  const dropOnBucket = (e, name) => {
+    e.preventDefault();
+    setDragOver(null);
+    setDragging(null);
+    const id = e.dataTransfer.getData("text/plain");
+    const item = items.find((i) => i.id === id);
+    if (item && item.location !== name) setLocation(item, name);
   };
 
   const cookable = useMemo(() => {
@@ -1915,6 +2071,12 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
   }, [recipes, pantry, recency]);
 
   const ready = cookable.filter((c) => c.missing.length === 0);
+
+  // `detail` is set once, on click; after a status/amount change triggers
+  // reload(), the underlying item object is new. Look it up fresh each
+  // render so the popover reflects what was just clicked rather than a
+  // stale snapshot.
+  const liveDetail = detail ? items.find((i) => i.id === detail.id) || detail : null;
 
   return html`
     <div>
@@ -1936,18 +2098,10 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
         <${Problem} text=${err} />
 
         ${pantry.size > 8 && html`
-          <div class="row wrap" style="margin:10px 0 4px;gap:8px">
-            <input class="picksearch" type="text" value=${search}
-              placeholder="Find something in the pantry"
-              onInput=${(e) => setSearch(e.target.value)}
-              style="flex:1;min-width:180px" />
-            <span class="viewswap">
-              <button class=${layout === "rows" ? "on" : ""}
-                onClick=${() => setLayoutSticky("rows")}>Rows</button>
-              <button class=${layout === "cards" ? "on" : ""}
-                onClick=${() => setLayoutSticky("cards")}>Cards</button>
-            </span>
-          </div>`}
+          <input class="picksearch" type="text" value=${search}
+            placeholder="Find something in the pantry"
+            onInput=${(e) => setSearch(e.target.value)}
+            style="margin:10px 0 4px" />`}
 
         ${!pantry.size
           ? html`<div class="empty">
@@ -1955,66 +2109,71 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
                 shop — anything you tick off the grocery list lands here
                 automatically.</p>
             </div>`
-          : grouped.map(([aisle, rows]) => html`
-            <div key=${aisle}>
-              <div class="aisle">
-                <span class="name">${aisle}</span>
-                <span class="count num">${rows.length}</span>
-              </div>
+          : html`
+            <div class="row wrap" style="margin:2px 0 4px;gap:10px">
+              <p class="small muted" style="margin:0">
+                Tap anything for status and details. Drag a chip onto a
+                bucket to move it — on a phone, use the “where it lives”
+                menu inside the popover instead.
+              </p>
+              <span class="spacer"></span>
+              <button class="btn quiet" onClick=${() => setEditingBuckets(!editingBuckets)}>
+                ${editingBuckets ? "Done arranging buckets" : "Arrange buckets"}
+              </button>
+            </div>
 
-              ${layout === "cards"
-                ? html`
-                  <div class="pangrid">
-                    ${rows.map((it) => html`
-                      <div class=${"pancard status-" + it.status} key=${it.id}>
-                        <button class="kill" title="Take out of the pantry"
-                          onClick=${() => drop(it)}>×</button>
-                        <button class="panname" onClick=${() => setFixing(it)}
-                          title="Fix the name, aisle or conversions">
-                          ${it.ing.name}
-                        </button>
-                        <div class="amountrow">
-                          <input class="panqty" type="text" value=${it.quantity ?? ""}
-                            placeholder="amount"
-                            onBlur=${(e) => setAmount(it, e.target.value)}
-                            onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
-                          <select class="panunit" value=${it.unit || ""}
-                            onChange=${(e) => setUnit(it, e.target.value || null)}>
-                            <option value="">—</option>
-                            ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
-                          </select>
-                        </div>
-                        <span class="statusgroup">
-                          ${STATUS.map((s) => html`
-                            <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
-                              onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
-                        </span>
-                      </div>`)}
-                  </div>`
-                : rows.map((it) => html`
-                  <div class=${"panrow status-" + it.status} key=${it.id}>
-                    <button class="panname" onClick=${() => setFixing(it)}
-                      title="Fix the name, aisle or conversions">
-                      ${it.ing.name}
-                    </button>
-                    <span class="statusgroup">
-                      ${STATUS.map((s) => html`
-                        <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
-                          onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
-                    </span>
-                    <input class="panqty" type="text" value=${it.quantity ?? ""}
-                      placeholder="amount"
-                      onBlur=${(e) => setAmount(it, e.target.value)}
+            ${editingBuckets && html`
+              <div class="bucketedit">
+                ${locations.map((b) => html`
+                  <div class="bucketeditrow" key=${b.id}>
+                    <input type="text" value=${b.name}
+                      onBlur=${(e) => renameBucket(b.name, e.target.value)}
                       onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
-                    <select class="panunit" value=${it.unit || ""}
-                      onChange=${(e) => setUnit(it, e.target.value || null)}>
-                      <option value="">—</option>
-                      ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
-                    </select>
-                    <button class="btn quiet" title="Take out of the pantry"
-                      onClick=${() => drop(it)}>×</button>
+                    <button class="btn quiet" onClick=${() => removeBucket(b.name)}>Remove</button>
                   </div>`)}
-            </div>`)}
+                <div class="row" style="margin-top:8px">
+                  <input type="text" value=${newBucket} placeholder="New bucket — “Fridge door”"
+                    onInput=${(e) => setNewBucket(e.target.value)}
+                    onKeyDown=${(e) => e.key === "Enter" && addBucket()} />
+                  <button class="btn sm" onClick=${addBucket}>Add</button>
+                </div>
+              </div>`}
+
+            ${bucketNames.map((name) => {
+              const rows = bucketed.get(name) || [];
+              if (!rows.length && name === "Other" && locations.length) return null;
+              return html`
+              <div key=${name}
+                class=${"bucket" + (dragOver === name ? " over" : "")}
+                onDragOver=${(e) => { e.preventDefault(); if (dragOver !== name) setDragOver(name); }}
+                onDragLeave=${() => setDragOver((d) => (d === name ? null : d))}
+                onDrop=${(e) => dropOnBucket(e, name)}>
+                <div class="aisle">
+                  <span class="name">${name}</span>
+                  <span class="count num">${rows.length}</span>
+                </div>
+                ${!rows.length
+                  ? html`<p class="small muted" style="padding:10px 2px">
+                      Nothing here. Drag something in, or move it here from
+                      its popover.
+                    </p>`
+                  : html`
+                    <div class="pchips">
+                      ${rows.map((it) => html`
+                        <button type="button"
+                          class=${"pchip status-" + it.status
+                            + (dragging === it.id ? " dragging" : "")}
+                          key=${it.id} draggable="true"
+                          onDragStart=${(e) => dragItem(e, it)}
+                          onDragEnd=${() => { setDragging(null); setDragOver(null); }}
+                          onClick=${() => setDetail(it)}>
+                          <span class="pchipname">${it.ing.name}</span>
+                          ${it.status !== "plenty" && html`
+                            <span class="pchiptag">${it.status}</span>`}
+                        </button>`)}
+                    </div>`}
+              </div>`;
+            })}`}
       ` : html`
         ${!pantry.size
           ? html`<div class="empty">
@@ -2048,6 +2207,13 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
               </div>`)}
           `}
       `}
+
+      ${liveDetail && html`<${PantryQuickEdit} item=${liveDetail} buckets=${bucketNames}
+        onClose=${() => setDetail(null)}
+        onFix=${(it) => { setDetail(null); setFixing(it); }}
+        onStatus=${setStatus} onAmount=${setAmount} onUnit=${setUnit}
+        onLocation=${setLocation}
+        onDrop=${drop} />`}
 
       ${fixing && html`<${IngredientEditor} item=${fixing} catalog=${catalog}
         onClose=${() => setFixing(null)}
@@ -2355,7 +2521,7 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
 
 function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reload }) {
   const [system, setSystem] = useState(
-    () => localStorage.getItem("sm-units") || "us");
+    () => normaliseSystem(localStorage.getItem("sm-units")));
   const [tidy, setTidy] = useState(false);
   const [adding, setAdding] = useState("");
 
@@ -2442,11 +2608,6 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
         <button onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
         <button onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
         <span class="label">${spanLabel(week)}</span>
-        <span class="spacer"></span>
-        <button class="btn ghost sm"
-          onClick=${() => setSystemSticky(system === "us" ? "metric" : "us")}>
-          ${system === "us" ? "cups / lb" : "g / ml"}
-        </button>
       </div>
 
       ${!total.length
@@ -2455,11 +2616,19 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
               the list fills in on its own.</p>
           </div>`
         : html`
-          <div class="row small" style="margin-bottom:4px">
+          <div class="listbar">
             <span class="tally">${left} of ${needed.length} left</span>
             ${stocked.length > 0 && html`
               <span class="tally have">${stocked.length} in the pantry</span>`}
             <span class="spacer"></span>
+            <label class="unitpick">
+              <span class="sr">Show amounts in</span>
+              <select value=${system}
+                onChange=${(e) => setSystemSticky(e.target.value)}>
+                ${SYSTEMS.map((s) => html`
+                  <option value=${s.key}>${s.label}</option>`)}
+              </select>
+            </label>
             <button class="btn quiet" onClick=${() => setTidy(!tidy)}>
               ${tidy ? "Done tidying" : "Fix aisles"}
             </button>
@@ -2541,6 +2710,7 @@ function App() {
   const [needs, setNeeds] = useState([]);
   const [saved, setSaved] = useState([]);
   const [pantry, setPantry] = useState(() => new Map());
+  const [locations, setLocations] = useState([]);
   const [recency, setRecency] = useState(() => new Map());
   const [fault, setFault] = useState("");
 
@@ -2574,7 +2744,7 @@ function App() {
     const from = iso(week);
     const to = iso(addDays(week, 6));
 
-    const [r, l, c, a, m, n, s, p, h] = await Promise.all([
+    const [r, l, c, a, m, n, s, p, h, pl] = await Promise.all([
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
         .eq("household_id", household.id).order("title"),
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
@@ -2592,9 +2762,11 @@ function App() {
       sb.from("meal_plan").select("recipe_id, scheduled_on")
         .eq("household_id", household.id)
         .order("scheduled_on", { ascending: false }).limit(120),
+      sb.from("pantry_locations").select("*")
+        .eq("household_id", household.id).order("sort_order"),
     ]);
 
-    const bad = [r, l, c, a, m, n, s, p, h].find((x) => x.error);
+    const bad = [r, l, c, a, m, n, s, p, h, pl].find((x) => x.error);
     if (bad) { setFault(bad.error.message); return; }
     setFault("");
     setRecipes(r.data || []);
@@ -2605,6 +2777,7 @@ function App() {
     setNeeds(n.data || []);
     setSaved(s.data || []);
     setPantry(new Map((p.data || []).map((x) => [x.ingredient_id, x])));
+    setLocations(pl.data || []);
 
     // Rank by how recently each recipe was last on the calendar, so the
     // picker opens on what this household actually cooks.
@@ -2631,6 +2804,9 @@ function App() {
         { event: "*", schema: "public", table: "meal_tweaks" }, load)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "pantry_items",
+          filter: `household_id=eq.${household.id}` }, load)
+      .on("postgres_changes",
+        { event: "*", schema: "public", table: "pantry_locations",
           filter: `household_id=eq.${household.id}` }, load)
       .subscribe();
     return () => { sb.removeChannel(ch); };
@@ -2681,7 +2857,7 @@ function App() {
           onOpen=${(r, own) => setViewing({ recipe: r, own })} />`}
 
         ${tab === "pantry" && html`<${PantryTab} household=${household}
-          pantry=${pantry} catalog=${catalog} aisles=${aisles}
+          pantry=${pantry} catalog=${catalog} locations=${locations}
           recipes=${recipes} recency=${recency} reload=${load}
           onPlan=${(r) => { setTab("plan"); setPlanThis(r); }} />`}
 
