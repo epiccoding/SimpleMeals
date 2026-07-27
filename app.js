@@ -212,6 +212,12 @@ const PREP_WORDS = [
   "boneless", "skinless", "finely", "roughly", "thinly",
 ];
 
+// A bare number with no unit is only believable as a count up to about
+// here. Eggs come by the dozen, 18, or 30, so the ceiling has to clear
+// those. Above it, a leading number is far more likely part of a product
+// name — 90 second rice, 100% whole wheat, 1000 island dressing.
+const MAX_BARE_COUNT = 48;
+
 function unvulgar(text) {
   let out = text;
   for (const [glyph, plain] of Object.entries(VULGAR)) {
@@ -368,7 +374,7 @@ function parseLine(line, catalog, opts = {}) {
     if (tail) notes.push(tail);
     return {
       qty: 1,
-      unit: whole.hit.canonical_unit === "count" ? "count" : "count",
+      unit: whole.hit.canonical_unit || "count",
       name: whole.hit.name,
       note: notes.filter(Boolean).join(", "),
       matched: whole.hit,
@@ -385,12 +391,18 @@ function parseLine(line, catalog, opts = {}) {
   // "2% milk" — a percent sign is never a measurement here
   if (takeNumber && /^\s*%/.test(num.rest)) takeNumber = false;
 
-  // In cautious mode a bare number only counts when a unit follows it, or
-  // when what's left is an ingredient we already know.
+  // In cautious mode a bare number — one with no unit after it — only
+  // counts when it's a plausible kitchen count AND what's left names
+  // something we already know.
+  //
+  // The ceiling matters. Without it the rule feeds itself: parse
+  // "90 second rice" wrongly once, an ingredient called "second rice"
+  // gets created, and from then on that junk entry is the very thing
+  // that makes the same wrong parse look correct.
   if (takeNumber && cautious && !un.unit) {
     const rest = num.rest.replace(/^\s*(of)\s+/i, "").trim();
     const known = rest ? matchCatalog(rest, catalog) : null;
-    if (!known?.exact) takeNumber = false;
+    if (!known?.exact || num.qty > MAX_BARE_COUNT) takeNumber = false;
   }
 
   let rest = takeNumber ? un.rest : text;
