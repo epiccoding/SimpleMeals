@@ -180,8 +180,14 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .line .kill:hover{color:var(--danger)}
 
 /* ---------- week strip ---------- */
-.weeknav{display:flex;align-items:center;gap:8px;margin-bottom:14px}
-.weeknav .label{font-family:var(--sign);font-weight:600;letter-spacing:.08em;text-transform:uppercase;font-size:15px}
+.weeknav{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.weeknav .label{
+  font-family:var(--sign);font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;font-size:15px;
+  min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.weeknav .btn{flex:none;white-space:nowrap}
+.weeknav .spacer{min-width:8px}
 .weeknav button{
   background:var(--card);border:1.5px solid var(--line);border-radius:8px;
   width:34px;height:34px;cursor:pointer;font-size:16px;line-height:1;
@@ -219,6 +225,29 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
   font-size:11px;padding:2px 7px;border-radius:99px;background:#EDF1EC;color:var(--brand-deep);
 }
 .pill.pub{background:var(--accent);color:#3A2A05}
+
+/* ---------- photos ---------- */
+.shot{
+  display:block;width:100%;aspect-ratio:4/3;object-fit:cover;
+  background:#E4EAE3;border-radius:8px;
+}
+.recipe .shot{
+  width:calc(100% + 30px);margin:-15px -15px 12px;
+  border-radius:var(--r) var(--r) 0 0;
+}
+.pickphoto{
+  display:inline-flex;align-items:center;gap:8px;cursor:pointer;
+  background:transparent;color:var(--brand-deep);border:1.5px solid var(--line);
+  border-radius:8px;padding:9px 14px;font-weight:600;font-size:14px;
+}
+.pickphoto:hover{border-color:var(--brand);background:#EDF1EC}
+.pickphoto input{display:none}
+.shotwrap{position:relative}
+.shotwrap .busy{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(19,34,29,.55);color:#fff;border-radius:8px;
+  font-family:var(--num);font-size:13px;
+}
 
 /* ---------- ingredient editor rows ---------- */
 .ing{display:grid;grid-template-columns:1fr 74px 92px 32px;gap:6px;margin-bottom:6px;align-items:start}
