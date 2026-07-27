@@ -282,13 +282,23 @@ function singularPhrase(phrase) {
 }
 
 /**
- * Reuse an ingredient that already exists rather than making a near
- * duplicate. This is what stops "egg" and "large egg" becoming two
- * separate things that never add together on the list.
+ * Look for an ingredient that already exists. Two grades of result:
+ *
+ *   exact  — same word, or just a plural ("eggs" → "large egg" never
+ *            qualifies; "bananas" → "banana" does). Safe to adopt silently.
+ *   loose  — only matches after dropping words like "shredded". Offered as
+ *            a suggestion, never applied, because "shredded carrot" is a
+ *            different thing to buy than "carrot".
  */
 function matchCatalog(name, catalog) {
   if (!name || !catalog?.length) return null;
   const raw = name.trim().toLowerCase();
+
+  const findIn = (needle) =>
+    catalog.find((c) => c.name.toLowerCase() === needle);
+
+  const exact = findIn(raw) || findIn(singularPhrase(raw));
+  if (exact) return { hit: exact, exact: true, dropped: [] };
 
   let stripped = raw;
   const dropped = [];
@@ -301,14 +311,11 @@ function matchCatalog(name, catalog) {
   }
   stripped = stripped.replace(/\s+/g, " ").trim();
 
-  const tries = [raw, singularPhrase(raw), stripped, singularPhrase(stripped)]
-    .filter(Boolean);
+  const loose = stripped && stripped !== raw
+    ? (findIn(stripped) || findIn(singularPhrase(stripped)))
+    : null;
 
-  for (const attempt of tries) {
-    const hit = catalog.find((c) => c.name.toLowerCase() === attempt);
-    if (hit) return { hit, dropped };
-  }
-  return { hit: null, dropped, cleaned: stripped };
+  return { hit: loose || null, exact: false, dropped, cleaned: stripped };
 }
 
 /** Read a quantity box that may hold "1 1/2", "½", ".75", or "2". */
@@ -360,24 +367,18 @@ function parseLine(line, catalog) {
 
   // "2 cloves garlic" should find the existing "garlic clove"
   let unit = un.unit;
-  let hit = match?.hit || null;
+  let hit = match?.exact ? match.hit : null;
+  let suggest = match?.exact ? null : match?.hit || null;
+
   if (!hit && (unit === "clove" || unit === "slice")) {
     const alt = matchCatalog(`${rest} ${unit}`, catalog);
-    if (alt?.hit) { hit = alt.hit; unit = "count"; }
+    if (alt?.exact) { hit = alt.hit; unit = "count"; suggest = null; }
   }
 
-  let name;
-  if (hit) {
-    name = hit.name;
-    if (match?.dropped?.length) notes.push(...match.dropped);
-  } else {
-    // No existing match, so drop preparation words from the name and
-    // keep them as notes instead of baking them into a new ingredient.
-    name = singularPhrase(match?.cleaned || rest);
-    if (match?.dropped?.length) notes.push(...match.dropped);
-  }
+  // Only an exact match rewrites the name. Anything looser is a suggestion,
+  // because dropping a word like "shredded" changes what you buy.
+  const name = hit ? hit.name : singularPhrase(rest);
 
-  if (!name) name = singularPhrase(rest);
   if (!unit) unit = "count";
 
   return {
@@ -386,6 +387,7 @@ function parseLine(line, catalog) {
     name,
     note: notes.filter(Boolean).join(", "),
     matched: hit,
+    suggest,
     guessedQty: num.qty === null,
   };
 }
@@ -816,16 +818,20 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
   const [bulk, setBulk] = useState("");
   const [showBulk, setShowBulk] = useState(false);
 
-  /** Typed "1 tsp sugar" into the name box? Split it into the fields. */
+  /**
+   * Typed "1 tsp sugar" into the name box? Split it into the fields.
+   * Only fires when the text actually opens with a quantity — otherwise a
+   * plain name like "shredded carrot" would get rewritten, and the words
+   * someone chose are the words they meant.
+   */
   const tidyRow = (i) => {
     const row = rows[i];
-    if (!row.name || !/\d|\s/.test(row.name)) return;
+    if (!row.name.trim()) return;
     const parsed = parseLine(row.name, catalog);
-    if (!parsed || !parsed.name) return;
-    if (parsed.name === row.name && parsed.guessedQty) return;
+    if (!parsed || !parsed.name || parsed.guessedQty) return;
     setRow(i, {
       name: parsed.name,
-      quantity: parsed.guessedQty && row.quantity ? row.quantity : String(parsed.qty),
+      quantity: String(parsed.qty),
       unit: parsed.unit,
       note: [row.note, parsed.note].filter(Boolean).join(", "),
     });
@@ -1018,8 +1024,9 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
 
       ${rows.map((r, i) => {
         const found = r.name.trim() ? matchCatalog(r.name, catalog) : null;
-        const hit = found?.hit;
-        const novel = r.name.trim() && !hit;
+        const exact = found?.exact ? found.hit : null;
+        const nearby = found && !found.exact ? found.hit : null;
+        const novel = r.name.trim() && !exact;
         const badQty = r.name.trim() && r.quantity.trim() && !(toNumber(r.quantity) > 0);
         return html`
         <div key=${i}>
@@ -1043,11 +1050,16 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
             <button class="d btn quiet" title="Remove"
               onClick=${() => setRows((rs) => rs.filter((_, j) => j !== i))}>×</button>
           </div>
-          ${(hit || novel || r.note || badQty) && html`
+          ${(exact || nearby || novel || r.note || badQty) && html`
             <div class="hint">
               ${badQty && html`<span class="warn">can't read that quantity</span>`}
-              ${hit && hit.name.toLowerCase() !== r.name.trim().toLowerCase()
-                && html`<span class="ok">adds up with “${hit.name}”</span>`}
+              ${exact && exact.name.toLowerCase() !== r.name.trim().toLowerCase()
+                && html`<span class="ok">adds up with “${exact.name}”</span>`}
+              ${nearby && html`
+                <button class="swap"
+                  onClick=${() => setRow(i, { name: nearby.name })}>
+                  use “${nearby.name}” instead?
+                </button>`}
               ${novel && html`<span class="new">new ingredient</span>`}
               ${r.note && html`<span class="muted">${r.note}</span>`}
             </div>`}

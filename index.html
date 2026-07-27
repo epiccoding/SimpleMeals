@@ -295,6 +295,12 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .hint .ok{color:var(--brand)}
 .hint .ok::before{content:"↳ "}
 .hint .warn{color:var(--danger);font-weight:600}
+.hint .swap{
+  background:none;border:0;padding:0;cursor:pointer;font:inherit;
+  color:var(--brand);text-decoration:underline;text-underline-offset:2px;
+}
+.hint .swap:hover{color:var(--brand-deep)}
+.hint .swap::before{content:"↳ "}
 .hint .new{
   font-family:var(--sign);font-weight:600;text-transform:uppercase;
   letter-spacing:.08em;font-size:11px;color:#7A5B12;
