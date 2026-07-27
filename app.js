@@ -53,24 +53,53 @@ function trim(n) {
 /** Render a canonical quantity in units a person would shop in. */
 function showQty(qty, canonUnit, system) {
   const q = Number(qty);
-  if (canonUnit === "count") return String(Math.ceil(q - 0.001));
+  if (canonUnit === "count") return { n: String(Math.ceil(q - 0.001)), u: "" };
 
   if (system === "metric") {
     if (canonUnit === "g") {
-      return q >= 1000 ? `${trim(q / 1000)} kg` : `${Math.round(q)} g`;
+      return q >= 1000
+        ? { n: trim(q / 1000), u: "kg" }
+        : { n: String(Math.round(q)), u: "g" };
     }
-    return q >= 1000 ? `${trim(q / 1000)} L` : `${Math.round(q)} ml`;
+    return q >= 1000
+      ? { n: trim(q / 1000), u: "L" }
+      : { n: String(Math.round(q)), u: "ml" };
   }
 
   if (canonUnit === "g") {
     const oz = q / MASS.oz;
-    if (oz >= 16) return `${trim(Math.round((oz / 16) * 20) / 20)} lb`;
-    if (oz >= 1) return `${frac(oz)} oz`;
-    return `${Math.round(q)} g`;
+    if (oz >= 16) return { n: trim(Math.round((oz / 16) * 20) / 20), u: "lb" };
+    if (oz >= 1) return { n: frac(oz), u: "oz" };
+    return { n: String(Math.round(q)), u: "g" };
   }
-  if (q >= VOL.cup * 0.75) return `${frac(q / VOL.cup)} cup`;
-  if (q >= VOL.tbsp) return `${frac(q / VOL.tbsp)} tbsp`;
-  return `${frac(q / VOL.tsp)} tsp`;
+  if (q >= VOL.cup * 0.75) return { n: frac(q / VOL.cup), u: "cup" };
+  if (q >= VOL.tbsp) return { n: frac(q / VOL.tbsp), u: "tbsp" };
+  return { n: frac(q / VOL.tsp), u: "tsp" };
+}
+
+/**
+ * Fraction glyphs like ⅔ render tiny next to full-size digits. Wrap them
+ * so they can be scaled back up to something readable in a shop aisle.
+ */
+const FRACTION_GLYPH = /([\u00bc-\u00be\u2150-\u215e])/;
+
+/** Show a recipe's own amount, scaled, in the unit it was written in. */
+function showAmount(qty, unit) {
+  const q = Number(qty);
+  const whole = Math.abs(q - Math.round(q)) < 0.02;
+  return {
+    n: whole ? String(Math.round(q)) : (q < 10 ? frac(q) : trim(q)),
+    u: unit === "count" ? "" : unit,
+  };
+}
+
+function qtyNodes(text) {
+  return String(text)
+    .split(FRACTION_GLYPH)
+    .filter(Boolean)
+    .map((part) => (FRACTION_GLYPH.test(part)
+      ? html`<em class="fr">${part}</em>`
+      : part));
 }
 
 /* ============================================================
@@ -473,7 +502,7 @@ function buildList(needs, saved, pantry) {
    Small shared components
    ============================================================ */
 
-function Sheet({ title, onClose, children }) {
+function Sheet({ title, onClose, wide, children }) {
   const ref = useRef(null);
   useEffect(() => {
     const esc = (e) => e.key === "Escape" && onClose();
@@ -484,7 +513,8 @@ function Sheet({ title, onClose, children }) {
 
   return html`
     <div class="veil" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-      <div class="sheet" role="dialog" aria-modal="true" tabindex="-1" ref=${ref}>
+      <div class=${"sheet" + (wide ? " wide" : "")} role="dialog" aria-modal="true"
+        tabindex="-1" ref=${ref}>
         <header>
           <h3>${title}</h3>
           <button class="x" onClick=${onClose} aria-label="Close">×</button>
@@ -608,6 +638,128 @@ function Onboard({ onReady }) {
         <${Problem} text=${err} />
       </div>
     </div>`;
+}
+
+/* ============================================================
+   Reading a recipe while you cook it
+   ============================================================ */
+
+function RecipeViewer({ recipe, own, onClose, onEdit }) {
+  const [servings, setServings] = useState(recipe.servings);
+  const [stepsDone, setStepsDone] = useState(() => new Set());
+  const [added, setAdded] = useState(() => new Set());
+
+  // Keep the screen on — nobody wants to wake a phone with batter on
+  // their hands. Unsupported browsers just skip it.
+  useEffect(() => {
+    let lock = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const l = await navigator.wakeLock?.request("screen");
+        if (cancelled) l?.release(); else lock = l;
+      } catch { /* denied, or not supported */ }
+    })();
+    return () => { cancelled = true; try { lock?.release(); } catch {} };
+  }, []);
+
+  const scale = servings / recipe.servings;
+
+  const lines = (recipe.recipe_ingredients || [])
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order);
+
+  const steps = (recipe.instructions || "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const toggle = (set, key, apply) => {
+    const next = new Set(set);
+    next.has(key) ? next.delete(key) : next.add(key);
+    apply(next);
+  };
+
+  const allDone = steps.length > 0 && stepsDone.size === steps.length;
+
+  return html`
+    <${Sheet} title=${recipe.title} onClose=${onClose} wide=${true}>
+      <div class="cookhead">
+        <label class="row" style="gap:8px">
+          <span class="sign muted" style="font-size:12px">Making for</span>
+          <input class="servebox" type="number" min="1" value=${servings}
+            onInput=${(e) => setServings(Math.max(1, Number(e.target.value) || 1))} />
+        </label>
+        ${scale !== 1 && html`
+          <span class="scaled num">×${trim(scale)} from ${recipe.servings}</span>`}
+        <span class="spacer"></span>
+        ${own && html`<button class="btn ghost sm" onClick=${onEdit}>Edit</button>`}
+      </div>
+
+      ${recipe.image_path && (own || recipe.share_photo) && html`
+        <img class="shot cookshot" src=${photoUrl(recipe.image_path)} alt="" />`}
+
+      <div class="cook">
+        <div class="cookcol">
+          <div class="aisle"><span class="name">Ingredients</span>
+            <span class="count num">${lines.length}</span></div>
+          <div class="inglist">
+            ${lines.map((l) => {
+              const a = showAmount(Number(l.quantity) * scale, l.unit);
+              const got = added.has(l.id);
+              return html`
+                <label class=${"cookline" + (got ? " done" : "")} key=${l.id}>
+                  <input type="checkbox" class="tick" checked=${got}
+                    onChange=${() => toggle(added, l.id, setAdded)} />
+                  <span class="amt num">
+                    <b>${qtyNodes(a.n)}</b>${a.u && html`<i>${a.u}</i>`}
+                  </span>
+                  <span class="ingname">
+                    ${l.ingredients?.name || "—"}
+                    ${l.note && html`<em class="prep">${l.note}</em>`}
+                  </span>
+                </label>`;
+            })}
+            ${!lines.length && html`<p class="muted small">No ingredients listed.</p>`}
+          </div>
+        </div>
+
+        <div class="cookcol">
+          <div class="aisle"><span class="name">Method</span>
+            ${steps.length > 0 && html`
+              <span class="count num">${stepsDone.size}/${steps.length}</span>`}</div>
+
+          ${!steps.length
+            ? html`<p class="muted small" style="padding:14px 2px">
+                No method written down yet. ${own ? "Add one with Edit." : ""}</p>`
+            : html`
+              <ol class="steps">
+                ${steps.map((text, i) => {
+                  const done = stepsDone.has(i);
+                  return html`
+                    <li class=${"step" + (done ? " done" : "")} key=${i}>
+                      <button class="stepno" aria-pressed=${String(done)}
+                        onClick=${() => toggle(stepsDone, i, setStepsDone)}>
+                        ${done ? "✓" : i + 1}
+                      </button>
+                      <span class="steptext"
+                        onClick=${() => toggle(stepsDone, i, setStepsDone)}>${text}</span>
+                    </li>`;
+                })}
+              </ol>
+              <div class="row" style="margin-top:14px">
+                ${allDone
+                  ? html`<span class="pill pub">All steps done</span>`
+                  : html`<span class="small muted">Tap a step to cross it off.</span>`}
+                <span class="spacer"></span>
+                ${stepsDone.size > 0 && html`
+                  <button class="btn quiet" onClick=${() => setStepsDone(new Set())}>
+                    Start over
+                  </button>`}
+              </div>`}
+        </div>
+      </div>
+    <//>`;
 }
 
 /* ============================================================
@@ -1008,7 +1160,7 @@ function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
    Plan tab
    ============================================================ */
 
-function PlanTab({ household, recipes, meals, week, setWeek, reload }) {
+function PlanTab({ household, recipes, meals, week, setWeek, reload, onOpen }) {
   const [picker, setPicker] = useState(null);
   const today = iso(new Date());
 
@@ -1052,9 +1204,12 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload }) {
                 <div class="meal" key=${m.id}>
                   <button class="kill" title="Remove"
                     onClick=${() => remove(m.id)}>×</button>
-                  <div class="slot">${m.meal_slot}</div>
-                  <div>${m.recipes?.title || "—"}</div>
-                  <div class="srv">${m.servings} servings</div>
+                  <button class="mealopen"
+                    onClick=${() => onOpen(recipes.find((r) => r.id === m.recipe_id))}>
+                    <span class="slot">${m.meal_slot}</span>
+                    <span class="mealname">${m.recipes?.title || "—"}</span>
+                    <span class="srv">${m.servings} servings</span>
+                  </button>
                 </div>`)}
               <button class="add" onClick=${() => setPicker({ date: key })}>+ meal</button>
             </div>`;
@@ -1072,7 +1227,7 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload }) {
    Recipes tab
    ============================================================ */
 
-function RecipesTab({ household, mine, library, catalog, reload }) {
+function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
   const [editing, setEditing] = useState(null);
   const [view, setView] = useState("mine");
   const [busy, setBusy] = useState("");
@@ -1155,8 +1310,9 @@ function RecipesTab({ household, mine, library, catalog, reload }) {
           <div class="recipe" key=${r.id}>
             ${photoVisible(r, own) && html`
               <img class="shot" src=${photoUrl(r.image_path)} alt=""
-                loading="lazy" />`}
-            <h3>${r.title}</h3>
+                loading="lazy" onClick=${() => onOpen(r, own)} />`}
+            <h3><button class="titlelink"
+              onClick=${() => onOpen(r, own)}>${r.title}</button></h3>
             <div class="meta">Serves ${r.servings} ·
               ${r.recipe_ingredients?.length || 0} ingredients</div>
             <div class="row wrap" style="margin-top:11px">
@@ -1288,8 +1444,8 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
               the list fills in on its own.</p>
           </div>`
         : html`
-          <div class="row small muted" style="margin-bottom:4px">
-            <span class="num">${left} of ${total.length} left</span>
+          <div class="row small" style="margin-bottom:4px">
+            <span class="tally">${left} of ${total.length} left</span>
             <span class="spacer"></span>
             <button class="btn quiet" onClick=${() => setTidy(!tidy)}>
               ${tidy ? "Done tidying" : "Fix aisles"}
@@ -1303,7 +1459,13 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
                 <span class="name">${aisle}</span>
                 <span class="count num">${grouped.get(aisle).length}</span>
               </div>
-              ${grouped.get(aisle).map((row) => html`
+              ${grouped.get(aisle).map((row) => {
+                const q = row.manual
+                  ? { n: row.qty ? trim(row.qty) : "", u: row.unit || "" }
+                  : row.literal
+                    ? { n: trim(row.qty), u: row.unit }
+                    : showQty(row.qty, row.unit, system);
+                return html`
                 <div class=${"line" + (row.checked ? " done" : "")} key=${row.key}>
                   <input class="tick" type="checkbox" checked=${row.checked}
                     aria-label=${row.name}
@@ -1323,11 +1485,9 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
                         always have
                       </label>`
                     : html`
-                      <span class="qty">${row.manual
-                        ? (row.qty ? `${trim(row.qty)} ${row.unit}` : "")
-                        : row.literal
-                          ? `${trim(row.qty)} ${row.unit}`
-                          : showQty(row.qty, row.unit, system)}</span>`}
+                      <span class="qty">
+                        <b>${qtyNodes(q.n)}</b>${q.u && html`<i>${q.u}</i>`}
+                      </span>`}
                   ${row.manual && html`<button class="kill" title="Remove"
                     onClick=${() => dropManual(row)}>×</button>`}
                 </div>
@@ -1335,7 +1495,8 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
                   <div class="small muted" style="padding:0 4px 8px 33px">
                     Kept as written — “${row.unit}” can't be converted for this
                     ingredient, so it isn't merged with other amounts.
-                  </div>`}`)}
+                  </div>`}`;
+              })}
             </div>`)}`}
 
       <div class="row" style="margin-top:26px">
@@ -1356,6 +1517,8 @@ function App() {
   const [household, setHousehold] = useState(undefined);
   const [tab, setTab] = useState("plan");
   const [week, setWeek] = useState(() => weekStart(new Date()));
+  const [viewing, setViewing] = useState(null);
+  const [editingFromView, setEditingFromView] = useState(null);
 
   const [recipes, setRecipes] = useState([]);
   const [library, setLibrary] = useState([]);
@@ -1400,7 +1563,7 @@ function App() {
     const [r, l, c, a, m, n, s, p] = await Promise.all([
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
         .eq("household_id", household.id).order("title"),
-      sb.from("recipes").select("*, recipe_ingredients(id)")
+      sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
         .eq("is_public", true).neq("household_id", household.id).order("title"),
       sb.from("ingredients").select("id, name, aisle, canonical_unit").order("name"),
       sb.from("aisles").select("*").order("sort_order"),
@@ -1476,10 +1639,12 @@ function App() {
 
         ${tab === "plan" && html`<${PlanTab} household=${household}
           recipes=${recipes} meals=${meals} week=${week} setWeek=${setWeek}
-          reload=${load} />`}
+          reload=${load}
+          onOpen=${(r) => r && setViewing({ recipe: r, own: true })} />`}
 
         ${tab === "recipes" && html`<${RecipesTab} household=${household}
-          mine=${recipes} library=${library} catalog=${catalog} reload=${load} />`}
+          mine=${recipes} library=${library} catalog=${catalog} reload=${load}
+          onOpen=${(r, own) => setViewing({ recipe: r, own })} />`}
 
         ${tab === "list" && html`<${ListTab} household=${household}
           week=${week} setWeek=${setWeek} needs=${needs} saved=${saved}
@@ -1496,6 +1661,16 @@ function App() {
               recipes, plan, and list.</div>
           </div>`}
       </main>
+
+      ${viewing && html`<${RecipeViewer} recipe=${viewing.recipe}
+        own=${viewing.own}
+        onClose=${() => setViewing(null)}
+        onEdit=${() => { setEditingFromView(viewing.recipe); setViewing(null); }} />`}
+
+      ${editingFromView && html`<${RecipeEditor} household=${household}
+        recipe=${editingFromView} catalog=${catalog}
+        onClose=${() => setEditingFromView(null)}
+        onSaved=${() => { setEditingFromView(null); load(); }} />`}
     </div>`;
 }
 

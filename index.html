@@ -152,32 +152,55 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 
 /* ---------- receipt line with dotted leader ---------- */
 .line{
-  display:flex;align-items:baseline;gap:8px;
-  padding:11px 4px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:10px;
+  padding:13px 4px;border-bottom:1px solid var(--line);
 }
 .line .tick{
-  appearance:none;flex:none;width:21px;height:21px;margin:0;
+  appearance:none;flex:none;width:23px;height:23px;margin:0;
   border:2px solid var(--brand);border-radius:5px;background:var(--card);
   cursor:pointer;position:relative;align-self:center;
 }
 .line .tick:checked{background:var(--brand);border-color:var(--brand)}
 .line .tick:checked::after{
-  content:"";position:absolute;left:5px;top:2px;width:6px;height:11px;
+  content:"";position:absolute;left:6px;top:3px;width:6px;height:12px;
   border:solid #fff;border-width:0 2.5px 2.5px 0;transform:rotate(42deg);
 }
-.line .what{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
-.line .leader{
-  flex:1;border-bottom:1.5px dotted var(--line);
-  transform:translateY(-4px);min-width:14px;
+.line .what{
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58%;
+  font-size:16.5px;color:var(--ink);
 }
-.line .qty{font-family:var(--num);font-size:14.5px;white-space:nowrap}
-.line.done .what,.line.done .qty{color:var(--muted);text-decoration:line-through}
+.line .leader{
+  flex:1;border-bottom:2px dotted #C3CCC1;
+  transform:translateY(-3px);min-width:14px;
+}
+.line .qty{
+  font-family:var(--num);white-space:nowrap;
+  display:inline-flex;align-items:baseline;gap:6px;flex:none;
+}
+.line .qty b{
+  font-weight:500;font-size:18px;color:var(--ink);letter-spacing:-.01em;
+}
+.line .qty i{
+  font-style:normal;font-family:var(--sign);font-weight:600;
+  text-transform:uppercase;letter-spacing:.09em;
+  font-size:13.5px;color:var(--brand);
+}
+.line .qty .fr{font-style:normal;font-size:1.45em;line-height:0}
+.line.done .what{color:var(--muted);text-decoration:line-through}
+.line.done .qty b{color:var(--muted);text-decoration:line-through}
+.line.done .qty i{color:var(--muted)}
+.line.done .tick{opacity:.75}
 .line .from{font-size:12px;color:var(--muted);white-space:nowrap}
 .line .kill{
   background:none;border:0;color:var(--muted);cursor:pointer;
   font-size:18px;line-height:1;padding:0 2px;
 }
 .line .kill:hover{color:var(--danger)}
+
+.tally{
+  font-family:var(--num);font-size:13px;color:var(--ink);
+  background:#E7EDE6;border-radius:99px;padding:3px 11px;
+}
 
 /* ---------- week strip ---------- */
 .weeknav{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
@@ -289,9 +312,69 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
   border-radius:14px 14px 0 0;padding:18px var(--pad) calc(24px + env(safe-area-inset-bottom));
 }
 @media (min-width:620px){.sheet{border-radius:14px}}
+.sheet.wide{max-width:1020px}
 .sheet header{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .sheet header h3{margin:0;font-family:var(--sign);font-weight:700;letter-spacing:.07em;text-transform:uppercase;font-size:19px}
 .sheet header .x{margin-left:auto;background:none;border:0;font-size:24px;line-height:1;cursor:pointer;color:var(--muted)}
+
+/* ---------- cook view ---------- */
+.cookhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.servebox{width:72px;text-align:center;font-family:var(--num);padding:7px}
+.scaled{font-size:12.5px;color:var(--brand);background:#E7EDE6;border-radius:99px;padding:3px 10px}
+.cookshot{max-height:230px;margin-bottom:18px;aspect-ratio:auto}
+
+.cook{display:grid;grid-template-columns:1fr;gap:22px}
+@media (min-width:860px){
+  .cook{grid-template-columns:minmax(280px,360px) 1fr;gap:28px;align-items:start}
+  .cook .inglist{max-height:56vh;overflow:auto;padding-right:6px}
+  .cook .steps{max-height:56vh;overflow:auto;padding-right:6px}
+}
+.cook .aisle{margin-top:0}
+
+.cookline{
+  display:flex;align-items:baseline;gap:10px;
+  padding:10px 2px;border-bottom:1px solid var(--line);cursor:pointer;
+}
+.cookline .tick{flex:none;align-self:center}
+.cookline .amt{display:inline-flex;align-items:baseline;gap:4px;flex:none;min-width:58px}
+.cookline .amt b{font-weight:500;font-size:16px;color:var(--ink)}
+.cookline .amt i{
+  font-style:normal;font-family:var(--sign);font-weight:600;font-size:12px;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--brand);
+}
+.cookline .amt .fr{font-style:normal;font-size:1.45em;line-height:0}
+.cookline .ingname{font-size:15.5px;line-height:1.3}
+.cookline .prep{display:block;font-style:normal;font-size:12.5px;color:var(--muted)}
+.cookline.done .ingname,.cookline.done .amt b{color:var(--muted);text-decoration:line-through}
+.cookline.done .amt i{color:var(--muted)}
+
+.steps{list-style:none;margin:0;padding:0}
+.step{display:flex;gap:12px;padding:12px 2px;border-bottom:1px solid var(--line);align-items:flex-start}
+.stepno{
+  flex:none;width:29px;height:29px;border-radius:50%;cursor:pointer;
+  border:2px solid var(--brand);background:var(--card);color:var(--brand-deep);
+  font-family:var(--num);font-size:13px;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+}
+.stepno:hover{background:#E7EDE6}
+.step .steptext{font-size:16px;line-height:1.45;cursor:pointer;padding-top:3px}
+.step.done .stepno{background:var(--brand);border-color:var(--brand);color:#fff;font-size:15px}
+.step.done .steptext{color:var(--muted);text-decoration:line-through}
+
+/* ---------- clickable titles and meals ---------- */
+.titlelink{
+  background:none;border:0;padding:0;cursor:pointer;text-align:left;
+  font:inherit;color:var(--ink);
+}
+.titlelink:hover{color:var(--brand);text-decoration:underline}
+.mealopen{
+  display:block;width:100%;background:none;border:0;padding:0;cursor:pointer;
+  text-align:left;font:inherit;color:inherit;
+}
+.mealopen:hover .mealname{text-decoration:underline}
+.meal .mealname{display:block}
+.meal .slot{display:block}
+.meal .srv{display:block}
 
 /* ---------- gate ---------- */
 .gate{max-width:400px;margin:8vh auto;padding:0 var(--pad)}
