@@ -367,6 +367,38 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .step.done .stepno{background:var(--brand);border-color:var(--brand);color:#fff;font-size:15px}
 .step.done .steptext{color:var(--muted);text-decoration:line-through}
 
+/* ---------- searchable recipe picker ---------- */
+.picksearch{
+  width:100%;background:var(--card);border:1.5px solid var(--line);
+  border-radius:8px;padding:11px 13px;font-size:16px;
+}
+.picksearch:focus{border-color:var(--brand)}
+.picklabel{font-size:12px;margin:12px 0 6px;letter-spacing:.09em}
+.picklist{
+  max-height:300px;overflow:auto;margin-top:8px;
+  border:1px solid var(--line);border-radius:var(--r);background:var(--card);
+}
+.pickitem{
+  display:flex;align-items:center;gap:12px;width:100%;
+  background:none;border:0;border-bottom:1px solid var(--line);
+  padding:9px 11px;cursor:pointer;text-align:left;font:inherit;
+}
+.pickitem:last-child{border-bottom:0}
+.pickitem.active{background:#EDF1EC}
+.pickitem.chosen{background:#E2EBE1}
+.pickthumb{
+  flex:none;width:48px;height:48px;border-radius:7px;object-fit:cover;
+  background:#E4EAE3;display:block;
+}
+.pickthumb.blank{
+  background:repeating-linear-gradient(45deg,#E9EEE8,#E9EEE8 6px,#E2E9E1 6px,#E2E9E1 12px);
+}
+.pickbody{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.picktitle{font-size:15.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pickmeta{font-size:12px;color:var(--muted)}
+.pickwhy{font-size:12px;color:var(--brand)}
+.pickcheck{color:var(--brand);font-size:17px;flex:none}
+
 /* ---------- adjusting one meal ---------- */
 .adjust{padding-bottom:6px}
 .adjrow{

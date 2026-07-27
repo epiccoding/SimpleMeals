@@ -1330,11 +1330,117 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
 }
 
 /* ============================================================
+   Finding a recipe among many
+   ============================================================ */
+
+function scoreRecipe(recipe, query) {
+  if (!query) return { rank: 3, why: null };
+  const q = query.toLowerCase();
+  const title = recipe.title.toLowerCase();
+
+  if (title.startsWith(q)) return { rank: 0, why: null };
+  if (title.includes(q)) return { rank: 1, why: null };
+
+  const ing = (recipe.recipe_ingredients || [])
+    .map((r) => r.ingredients?.name)
+    .filter(Boolean)
+    .find((n) => n.toLowerCase().includes(q));
+  if (ing) return { rank: 2, why: `has ${ing}` };
+
+  return null;
+}
+
+function RecipePicker({ recipes, recency, value, onPick }) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const listRef = useRef(null);
+
+  const results = useMemo(() => {
+    const scored = [];
+    for (const r of recipes) {
+      const s = scoreRecipe(r, query.trim());
+      if (s) scored.push({ recipe: r, ...s });
+    }
+    scored.sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      const ra = recency?.get(a.recipe.id) ?? 9999;
+      const rb = recency?.get(b.recipe.id) ?? 9999;
+      if (ra !== rb) return ra - rb;
+      return a.recipe.title.localeCompare(b.recipe.title);
+    });
+    return scored;
+  }, [recipes, query, recency]);
+
+  useEffect(() => { setActive(0); }, [query]);
+
+  const move = (delta) => {
+    if (!results.length) return;
+    const next = Math.max(0, Math.min(results.length - 1, active + delta));
+    setActive(next);
+    const node = listRef.current?.children?.[next];
+    node?.scrollIntoView({ block: "nearest" });
+  };
+
+  const onKey = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const pick = results[active];
+      if (pick) onPick(pick.recipe);
+    }
+  };
+
+  const showingRecent = !query.trim() && recency?.size > 0;
+
+  return html`
+    <div class="picker">
+      <input class="picksearch" type="text" value=${query} autofocus
+        placeholder=${`Search ${recipes.length} recipes, or an ingredient`}
+        onInput=${(e) => setQuery(e.target.value)}
+        onKeyDown=${onKey} />
+
+      ${showingRecent && html`
+        <p class="sign muted picklabel">Most recent first</p>`}
+
+      ${!results.length
+        ? html`<p class="muted small" style="padding:16px 4px">
+            Nothing matches “${query}”.</p>`
+        : html`
+          <div class="picklist" ref=${listRef}>
+            ${results.map((res, i) => {
+              const r = res.recipe;
+              const chosen = r.id === value;
+              return html`
+                <button type="button" key=${r.id}
+                  class=${"pickitem" + (i === active ? " active" : "") + (chosen ? " chosen" : "")}
+                  onMouseEnter=${() => setActive(i)}
+                  onClick=${() => onPick(r)}>
+                  ${r.image_path
+                    ? html`<img class="pickthumb" src=${photoUrl(r.image_path)}
+                        alt="" loading="lazy" />`
+                    : html`<span class="pickthumb blank"></span>`}
+                  <span class="pickbody">
+                    <span class="picktitle">${r.title}</span>
+                    <span class="pickmeta num">
+                      serves ${r.servings} ·
+                      ${(r.recipe_ingredients || []).length} ingredients
+                    </span>
+                    ${res.why && html`<span class="pickwhy">${res.why}</span>`}
+                  </span>
+                  ${chosen && html`<span class="pickcheck">✓</span>`}
+                </button>`;
+            })}
+          </div>`}
+    </div>`;
+}
+
+/* ============================================================
    Add a meal to the calendar
    ============================================================ */
 
-function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
-  const [recipeId, setRecipeId] = useState(preselect || recipes[0]?.id || "");
+function MealPicker({ household, recipes, recency, date, preselect, onClose, onSaved }) {
+  const [recipeId, setRecipeId] = useState(preselect || "");
   const [when, setWhen] = useState(date || iso(new Date()));
   const [slot, setSlot] = useState("dinner");
   const chosen = recipes.find((r) => r.id === recipeId);
@@ -1372,27 +1478,30 @@ function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
 
   return html`
     <${Sheet} title="Add a meal" onClose=${onClose}>
-      <label class="field">
+      <label class="field" style="margin-bottom:6px">
         <span>Recipe</span>
-        <select value=${recipeId} onChange=${(e) => setRecipeId(e.target.value)}>
-          ${recipes.map((r) => html`<option value=${r.id}>${r.title}</option>`)}
-        </select>
       </label>
-      <label class="field">
-        <span>Date</span>
-        <input type="date" value=${when} onInput=${(e) => setWhen(e.target.value)} />
-      </label>
-      <label class="field">
-        <span>Meal</span>
-        <select value=${slot} onChange=${(e) => setSlot(e.target.value)}>
-          ${SLOTS.map((s) => html`<option value=${s}>${s}</option>`)}
-        </select>
-      </label>
-      <label class="field" style="max-width:160px">
-        <span>Serves</span>
-        <input type="number" min="1" value=${servings}
-          onInput=${(e) => setServings(e.target.value)} />
-      </label>
+      <${RecipePicker} recipes=${recipes} recency=${recency} value=${recipeId}
+        onPick=${(r) => setRecipeId(r.id)} />
+
+      <div class="row wrap" style="gap:12px;margin-top:18px">
+        <label class="field" style="margin:0;flex:1;min-width:150px">
+          <span>Date</span>
+          <input type="date" value=${when} onInput=${(e) => setWhen(e.target.value)} />
+        </label>
+        <label class="field" style="margin:0;flex:1;min-width:130px">
+          <span>Meal</span>
+          <select value=${slot} onChange=${(e) => setSlot(e.target.value)}>
+            ${SLOTS.map((s) => html`<option value=${s}>${s}</option>`)}
+          </select>
+        </label>
+        <label class="field" style="margin:0;width:100px">
+          <span>Serves</span>
+          <input type="number" min="1" value=${servings}
+            onInput=${(e) => setServings(e.target.value)} />
+        </label>
+      </div>
+
       <p class="small muted">Quantities scale automatically. ${chosen
         ? `This recipe is written for ${chosen.servings}.` : ""}</p>
       <${Problem} text=${err} />
@@ -1416,7 +1525,7 @@ function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
    Plan tab
    ============================================================ */
 
-function PlanTab({ household, recipes, meals, week, setWeek, reload, onOpen }) {
+function PlanTab({ household, recipes, recency, meals, week, setWeek, reload, onOpen }) {
   const [picker, setPicker] = useState(null);
   const today = iso(new Date());
 
@@ -1473,7 +1582,7 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload, onOpen }) {
       </div>
 
       ${picker && html`<${MealPicker} household=${household} recipes=${recipes}
-        date=${picker.date} preselect=${picker.recipeId}
+        recency=${recency} date=${picker.date} preselect=${picker.recipeId}
         onClose=${() => setPicker(null)}
         onSaved=${(created) => {
           setPicker(null);
@@ -1494,6 +1603,7 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
   const [view, setView] = useState("mine");
   const [busy, setBusy] = useState("");
   const [photosOnly, setPhotosOnly] = useState(false);
+  const [search, setSearch] = useState("");
 
   const remove = async (r) => {
     if (!confirm(`Delete "${r.title}"? Meals already on the calendar will go too.`)) return;
@@ -1532,14 +1642,17 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
 
   const own = view === "mine";
   const pool = own ? mine : library;
-  const shown = photosOnly
-    ? pool.filter((r) => photoVisible(r, own))
+  const searched = search.trim()
+    ? pool.filter((r) => scoreRecipe(r, search.trim()))
     : pool;
+  const shown = photosOnly
+    ? searched.filter((r) => photoVisible(r, own))
+    : searched;
   const withPhotos = pool.filter((r) => photoVisible(r, own)).length;
 
   return html`
     <div>
-      <div class="row wrap" style="margin-bottom:16px">
+      <div class="row wrap" style="margin-bottom:12px">
         <button class=${"btn sm " + (own ? "" : "ghost")}
           onClick=${() => setView("mine")}>Ours (${mine.length})</button>
         <button class=${"btn sm " + (!own ? "" : "ghost")}
@@ -1548,8 +1661,14 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
         <button class="btn sm" onClick=${() => setEditing({})}>New recipe</button>
       </div>
 
+      ${pool.length > 6 && html`
+        <input class="picksearch" type="text" value=${search}
+          placeholder=${`Search ${pool.length} recipes, or an ingredient`}
+          onInput=${(e) => setSearch(e.target.value)}
+          style="margin-bottom:12px" />`}
+
       ${withPhotos > 0 && html`
-        <div class="row small" style="margin:-6px 0 14px">
+        <div class="row small" style="margin:-2px 0 14px">
           <button class=${"btn sm " + (photosOnly ? "" : "ghost")}
             onClick=${() => setPhotosOnly(!photosOnly)}>
             With photos (${withPhotos})
@@ -1560,11 +1679,13 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
 
       ${!shown.length && html`
         <div class="empty">
-          <p>${photosOnly
-            ? "No photos here yet. Cook something and add one."
-            : own
-              ? "Nothing here yet. Add a recipe, or copy one from the library."
-              : "The library is empty. Share one of yours to start it off."}</p>
+          <p>${search.trim()
+            ? `Nothing matches “${search.trim()}”.`
+            : photosOnly
+              ? "No photos here yet. Cook something and add one."
+              : own
+                ? "Nothing here yet. Add a recipe, or copy one from the library."
+                : "The library is empty. Share one of yours to start it off."}</p>
         </div>`}
 
       <div class="recipes">
@@ -1790,6 +1911,7 @@ function App() {
   const [needs, setNeeds] = useState([]);
   const [saved, setSaved] = useState([]);
   const [pantry, setPantry] = useState([]);
+  const [recency, setRecency] = useState(() => new Map());
   const [fault, setFault] = useState("");
 
   /* --- session --- */
@@ -1822,7 +1944,7 @@ function App() {
     const from = iso(week);
     const to = iso(addDays(week, 6));
 
-    const [r, l, c, a, m, n, s, p] = await Promise.all([
+    const [r, l, c, a, m, n, s, p, h] = await Promise.all([
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
         .eq("household_id", household.id).order("title"),
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
@@ -1837,9 +1959,12 @@ function App() {
         .eq("household_id", household.id).eq("week_start", from),
       sb.from("pantry_staples").select("ingredient_id")
         .eq("household_id", household.id),
+      sb.from("meal_plan").select("recipe_id, scheduled_on")
+        .eq("household_id", household.id)
+        .order("scheduled_on", { ascending: false }).limit(120),
     ]);
 
-    const bad = [r, l, c, a, m, n, s, p].find((x) => x.error);
+    const bad = [r, l, c, a, m, n, s, p, h].find((x) => x.error);
     if (bad) { setFault(bad.error.message); return; }
     setFault("");
     setRecipes(r.data || []);
@@ -1850,6 +1975,14 @@ function App() {
     setNeeds(n.data || []);
     setSaved(s.data || []);
     setPantry((p.data || []).map((x) => x.ingredient_id));
+
+    // Rank by how recently each recipe was last on the calendar, so the
+    // picker opens on what this household actually cooks.
+    const seen = new Map();
+    for (const row of h.data || []) {
+      if (!seen.has(row.recipe_id)) seen.set(row.recipe_id, seen.size);
+    }
+    setRecency(seen);
   }, [household, week]);
 
   useEffect(() => { load(); }, [load]);
@@ -1902,8 +2035,8 @@ function App() {
         <${Problem} text=${fault} />
 
         ${tab === "plan" && html`<${PlanTab} household=${household}
-          recipes=${recipes} meals=${meals} week=${week} setWeek=${setWeek}
-          reload=${load}
+          recipes=${recipes} recency=${recency} meals=${meals}
+          week=${week} setWeek=${setWeek} reload=${load}
           onOpen=${(r, m, adjust) => r
             && setViewing({ recipe: r, own: true, meal: m, adjust })} />`}
 
