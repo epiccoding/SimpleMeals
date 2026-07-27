@@ -367,6 +367,25 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .step.done .stepno{background:var(--brand);border-color:var(--brand);color:#fff;font-size:15px}
 .step.done .steptext{color:var(--muted);text-decoration:line-through}
 
+/* ---------- adjusting one meal ---------- */
+.adjust{padding-bottom:6px}
+.adjrow{
+  display:grid;grid-template-columns:1fr 84px 92px auto;gap:8px;
+  align-items:center;padding:9px 2px;border-bottom:1px solid var(--line);
+}
+.adjrow input,.adjrow select{padding:8px 9px}
+.adjrow input{text-align:center}
+.adjname{font-size:15.5px;line-height:1.25}
+.adjrow.gone .adjname{color:var(--muted);text-decoration:line-through}
+.adjrow.gone input,.adjrow.gone select{opacity:.45}
+@media (max-width:560px){
+  .adjrow{grid-template-columns:1fr 1fr;grid-template-areas:"n n" "q u" "d d"}
+  .adjrow .adjname{grid-area:n}
+  .adjrow input{grid-area:q}
+  .adjrow select{grid-area:u}
+  .adjrow button{grid-area:d;justify-self:end}
+}
+
 /* ---------- clickable titles and meals ---------- */
 .titlelink{
   background:none;border:0;padding:0;cursor:pointer;text-align:left;

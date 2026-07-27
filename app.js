@@ -642,14 +642,47 @@ function Onboard({ onReady }) {
     </div>`;
 }
 
+/**
+ * Find an ingredient by name, creating it if it's genuinely new. Shared by
+ * the recipe editor and the per-meal adjuster.
+ */
+async function resolveIngredient(name, unit, catalog) {
+  const clean = name.trim();
+  const hit = catalog.find((c) => c.name.toLowerCase() === clean.toLowerCase());
+  if (hit) return hit.id;
+
+  const { data, error } = await sb.from("ingredients")
+    .insert({
+      name: clean.toLowerCase(),
+      canonical_unit: canonicalFor(unit),
+      aisle: "Other",
+    })
+    .select().single();
+
+  if (!error) return data.id;
+
+  // Someone else added it a moment ago; take theirs.
+  const { data: again } = await sb.from("ingredients")
+    .select("id").ilike("name", clean).limit(1);
+  if (again?.length) return again[0].id;
+  throw error;
+}
+
 /* ============================================================
    Reading a recipe while you cook it
    ============================================================ */
 
-function RecipeViewer({ recipe, own, onClose, onEdit }) {
-  const [servings, setServings] = useState(recipe.servings);
+function RecipeViewer({ recipe, own, meal, household, catalog, onClose, onEdit, onChanged }) {
+  const [servings, setServings] = useState(meal?.servings || recipe.servings);
   const [stepsDone, setStepsDone] = useState(() => new Set());
   const [added, setAdded] = useState(() => new Set());
+
+  const [tweaks, setTweaks] = useState(() => new Map());
+  const [adjusting, setAdjusting] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [extra, setExtra] = useState("");
+  const [saving, setSaving] = useState("");
+  const [err, setErr] = useState("");
 
   // Keep the screen on — nobody wants to wake a phone with batter on
   // their hands. Unsupported browsers just skip it.
@@ -665,11 +698,46 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
     return () => { cancelled = true; try { lock?.release(); } catch {} };
   }, []);
 
+  const loadTweaks = useCallback(async () => {
+    if (!meal) { setTweaks(new Map()); return; }
+    const { data } = await sb.from("meal_tweaks").select("*").eq("meal_id", meal.id);
+    setTweaks(new Map((data || []).map((t) => [t.ingredient_id, t])));
+  }, [meal?.id]);
+
+  useEffect(() => { loadTweaks(); }, [loadTweaks]);
+
   const scale = servings / recipe.servings;
 
-  const lines = (recipe.recipe_ingredients || [])
+  const base = (recipe.recipe_ingredients || [])
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order);
+
+  /** What this meal actually calls for, once tweaks are applied. */
+  const effective = useMemo(() => {
+    const out = [];
+    for (const l of base) {
+      const t = tweaks.get(l.ingredient_id);
+      if (t?.removed) continue;
+      out.push(t?.quantity != null
+        ? { ...l, quantity: t.quantity, unit: t.unit || l.unit, fixed: true }
+        : l);
+    }
+    for (const t of tweaks.values()) {
+      if (t.removed || t.quantity == null) continue;
+      if (base.some((l) => l.ingredient_id === t.ingredient_id)) continue;
+      out.push({
+        id: `extra:${t.ingredient_id}`,
+        ingredient_id: t.ingredient_id,
+        quantity: t.quantity,
+        unit: t.unit || "count",
+        note: null,
+        ingredients: catalog.find((c) => c.id === t.ingredient_id),
+        fixed: true,
+        isExtra: true,
+      });
+    }
+    return out;
+  }, [base, tweaks, catalog]);
 
   const steps = (recipe.instructions || "")
     .split(/\r?\n/)
@@ -684,6 +752,132 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
 
   const allDone = steps.length > 0 && stepsDone.size === steps.length;
 
+  /* ---- adjusting ---- */
+
+  const beginAdjust = () => {
+    setDraft(effective.map((l) => ({
+      ingredient_id: l.ingredient_id,
+      name: l.ingredients?.name || "—",
+      quantity: String(Number((Number(l.quantity) * (l.fixed ? 1 : scale)).toFixed(3))),
+      unit: l.unit,
+      removed: false,
+      fromRecipe: !l.isExtra,
+    })));
+    setErr("");
+    setAdjusting(true);
+  };
+
+  const setDraftRow = (i, patch) =>
+    setDraft((d) => d.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  const addExtra = async () => {
+    const text = extra.trim();
+    if (!text) return;
+    const parsed = parseLine(text, catalog) || { qty: 1, unit: "count", name: text };
+    setDraft((d) => [...d, {
+      ingredient_id: null,
+      name: parsed.name,
+      quantity: String(parsed.qty),
+      unit: parsed.unit,
+      removed: false,
+      fromRecipe: false,
+    }]);
+    setExtra("");
+  };
+
+  const saveForThisMeal = async () => {
+    const bad = draft.filter((r) => !r.removed && !(toNumber(r.quantity) > 0));
+    if (bad.length) {
+      setErr(`Need a quantity for: ${bad.map((r) => r.name).join(", ")}`);
+      return;
+    }
+    setSaving("meal"); setErr("");
+    try {
+      const rows = [];
+      for (const r of draft) {
+        const id = r.ingredient_id
+          || await resolveIngredient(r.name, r.unit, catalog);
+        rows.push({
+          meal_id: meal.id,
+          ingredient_id: id,
+          quantity: r.removed ? null : toNumber(r.quantity),
+          unit: r.removed ? null : r.unit,
+          removed: r.removed,
+        });
+      }
+      await sb.from("meal_tweaks").delete().eq("meal_id", meal.id);
+      if (rows.length) {
+        const { error } = await sb.from("meal_tweaks").insert(rows);
+        if (error) throw error;
+      }
+      await loadTweaks();
+      setAdjusting(false);
+      onChanged?.();
+    } catch (e) {
+      setErr(e.message || "Could not save the adjustment.");
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const saveAsNewRecipe = async () => {
+    const keep = draft.filter((r) => !r.removed);
+    if (!keep.length) { setErr("A recipe needs at least one ingredient."); return; }
+    const bad = keep.filter((r) => !(toNumber(r.quantity) > 0));
+    if (bad.length) {
+      setErr(`Need a quantity for: ${bad.map((r) => r.name).join(", ")}`);
+      return;
+    }
+    const title = prompt("Name for the new recipe", `${recipe.title} (our way)`);
+    if (!title?.trim()) return;
+
+    setSaving("recipe"); setErr("");
+    try {
+      const { data: made, error } = await sb.from("recipes").insert({
+        household_id: household.id,
+        title: title.trim(),
+        servings: Number(servings) || recipe.servings,
+        instructions: recipe.instructions,
+        is_public: false,
+        share_photo: true,
+        forked_from: recipe.id,
+      }).select().single();
+      if (error) throw error;
+
+      const lines = [];
+      for (let i = 0; i < keep.length; i++) {
+        const r = keep[i];
+        lines.push({
+          recipe_id: made.id,
+          ingredient_id: r.ingredient_id
+            || await resolveIngredient(r.name, r.unit, catalog),
+          quantity: toNumber(r.quantity),
+          unit: r.unit,
+          sort_order: i,
+        });
+      }
+      const { error: ie } = await sb.from("recipe_ingredients").insert(lines);
+      if (ie) throw ie;
+
+      // Point this calendar entry at the new recipe and drop the tweaks,
+      // since they're baked into the recipe now.
+      if (meal) {
+        await sb.from("meal_tweaks").delete().eq("meal_id", meal.id);
+        await sb.from("meal_plan")
+          .update({ recipe_id: made.id, servings: Number(servings) || recipe.servings })
+          .eq("id", meal.id);
+      }
+      onChanged?.();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Could not create the recipe.");
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const tweakCount = [...tweaks.values()].filter((t) => t.removed || t.quantity != null).length;
+
   return html`
     <${Sheet} title=${recipe.title} onClose=${onClose} wide=${true}>
       <div class="cookhead">
@@ -694,20 +888,81 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
         </label>
         ${scale !== 1 && html`
           <span class="scaled num">×${trim(scale)} from ${recipe.servings}</span>`}
+        ${meal && tweakCount > 0 && !adjusting && html`
+          <span class="pill pub">Adjusted for this meal</span>`}
         <span class="spacer"></span>
-        ${own && html`<button class="btn ghost sm" onClick=${onEdit}>Edit</button>`}
+        ${meal && !adjusting && html`
+          <button class="btn ghost sm" onClick=${beginAdjust}>Adjust this meal</button>`}
+        ${own && !adjusting && html`
+          <button class="btn ghost sm" onClick=${onEdit}>Edit recipe</button>`}
       </div>
 
-      ${recipe.image_path && (own || recipe.share_photo) && html`
+      ${recipe.image_path && (own || recipe.share_photo) && !adjusting && html`
         <img class="shot cookshot" src=${photoUrl(recipe.image_path)} alt="" />`}
 
+      ${adjusting
+        ? html`
+          <div class="adjust">
+            <p class="small muted" style="margin:0 0 12px">
+              Change amounts, drop what you're skipping, or add something.
+              Then keep it just for this meal, or turn it into a recipe of
+              its own.
+            </p>
+
+            ${draft.map((r, i) => html`
+              <div class=${"adjrow" + (r.removed ? " gone" : "")} key=${i}>
+                <span class="adjname">
+                  ${r.name}
+                  ${!r.fromRecipe && html`<em class="prep">added</em>`}
+                </span>
+                <input type="text" inputmode="text" value=${r.quantity}
+                  disabled=${r.removed}
+                  onInput=${(e) => setDraftRow(i, { quantity: e.target.value })} />
+                <select value=${r.unit} disabled=${r.removed}
+                  onChange=${(e) => setDraftRow(i, { unit: e.target.value })}>
+                  ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                </select>
+                <button class="btn quiet"
+                  onClick=${() => r.fromRecipe
+                    ? setDraftRow(i, { removed: !r.removed })
+                    : setDraft((d) => d.filter((_, j) => j !== i))}>
+                  ${r.fromRecipe ? (r.removed ? "put back" : "skip") : "×"}
+                </button>
+              </div>`)}
+
+            <div class="row" style="margin-top:14px">
+              <input type="text" value=${extra}
+                placeholder="Add something — “2 avocados”"
+                onInput=${(e) => setExtra(e.target.value)}
+                onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); addExtra(); } }} />
+              <button class="btn ghost sm" onClick=${addExtra}>Add</button>
+            </div>
+
+            <${Problem} text=${err} />
+
+            <div class="row wrap" style="margin-top:18px;gap:10px">
+              <button class="btn" disabled=${!!saving} onClick=${saveForThisMeal}>
+                ${saving === "meal" ? "Saving…" : "Keep for this meal only"}
+              </button>
+              <button class="btn ghost" disabled=${!!saving} onClick=${saveAsNewRecipe}>
+                ${saving === "recipe" ? "Creating…" : "Save as a new recipe"}
+              </button>
+              <button class="btn quiet" onClick=${() => setAdjusting(false)}>Cancel</button>
+            </div>
+            <p class="small muted" style="margin-top:10px">
+              “This meal only” leaves ${recipe.title} untouched for next time.
+              “New recipe” copies it with these changes and points this day at
+              the copy.
+            </p>
+          </div>`
+        : html`
       <div class="cook">
         <div class="cookcol">
           <div class="aisle"><span class="name">Ingredients</span>
-            <span class="count num">${lines.length}</span></div>
+            <span class="count num">${effective.length}</span></div>
           <div class="inglist">
-            ${lines.map((l) => {
-              const a = showAmount(Number(l.quantity) * scale, l.unit);
+            ${effective.map((l) => {
+              const a = showAmount(Number(l.quantity) * (l.fixed ? 1 : scale), l.unit);
               const got = added.has(l.id);
               return html`
                 <label class=${"cookline" + (got ? " done" : "")} key=${l.id}>
@@ -718,11 +973,12 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
                   </span>
                   <span class="ingname">
                     ${l.ingredients?.name || "—"}
+                    ${l.fixed && html`<em class="prep">set for this meal</em>`}
                     ${l.note && html`<em class="prep">${l.note}</em>`}
                   </span>
                 </label>`;
             })}
-            ${!lines.length && html`<p class="muted small">No ingredients listed.</p>`}
+            ${!effective.length && html`<p class="muted small">No ingredients listed.</p>`}
           </div>
         </div>
 
@@ -733,7 +989,7 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
 
           ${!steps.length
             ? html`<p class="muted small" style="padding:14px 2px">
-                No method written down yet. ${own ? "Add one with Edit." : ""}</p>`
+                No method written down yet. ${own ? "Add one with Edit recipe." : ""}</p>`
             : html`
               <ol class="steps">
                 ${steps.map((text, i) => {
@@ -760,7 +1016,7 @@ function RecipeViewer({ recipe, own, onClose, onEdit }) {
                   </button>`}
               </div>`}
         </div>
-      </div>
+      </div>`}
     <//>`;
 }
 
@@ -858,26 +1114,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
     setErr("");
   };
 
-  const resolve = async (name, unit) => {
-    const clean = name.trim();
-    const hit = catalog.find((c) => c.name.toLowerCase() === clean.toLowerCase());
-    if (hit) return hit.id;
-
-    const { data, error } = await sb.from("ingredients")
-      .insert({
-        name: clean.toLowerCase(),
-        canonical_unit: canonicalFor(unit),
-        aisle: "Other",
-      })
-      .select().single();
-
-    if (!error) return data.id;
-    // Someone else added it a moment ago; take theirs.
-    const { data: again } = await sb.from("ingredients")
-      .select("id").ilike("name", clean).limit(1);
-    if (again?.length) return again[0].id;
-    throw error;
-  };
+  const resolve = (name, unit) => resolveIngredient(name, unit, catalog);
 
   const save = async () => {
     const named = rows.filter((r) => r.name.trim());
@@ -1110,19 +1347,19 @@ function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
     if (r) setServings(r.servings);
   }, [recipeId]);
 
-  const save = async () => {
+  const save = async (thenAdjust) => {
     if (!recipeId) { setErr("Pick a recipe first."); return; }
     setBusy(true); setErr("");
-    const { error } = await sb.from("meal_plan").insert({
+    const { data, error } = await sb.from("meal_plan").insert({
       household_id: household.id,
       recipe_id: recipeId,
       scheduled_on: when,
       meal_slot: slot,
       servings: Number(servings) || 4,
-    });
+    }).select("*, recipes(id, title, servings)").single();
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    onSaved();
+    onSaved(thenAdjust ? data : null);
   };
 
   if (!recipes.length) {
@@ -1159,12 +1396,19 @@ function MealPicker({ household, recipes, date, preselect, onClose, onSaved }) {
       <p class="small muted">Quantities scale automatically. ${chosen
         ? `This recipe is written for ${chosen.servings}.` : ""}</p>
       <${Problem} text=${err} />
-      <div class="row" style="margin-top:14px">
-        <button class="btn" disabled=${busy} onClick=${save}>
+      <div class="row wrap" style="margin-top:14px;gap:10px">
+        <button class="btn" disabled=${busy} onClick=${() => save(false)}>
           ${busy ? "Adding…" : "Add to plan"}
         </button>
-        <button class="btn ghost" onClick=${onClose}>Cancel</button>
+        <button class="btn ghost" disabled=${busy} onClick=${() => save(true)}>
+          Add and adjust
+        </button>
+        <button class="btn quiet" onClick=${onClose}>Cancel</button>
       </div>
+      <p class="small muted" style="margin-top:8px">
+        “Add and adjust” opens it straight away so you can change amounts or
+        skip something, just for this day.
+      </p>
     <//>`;
 }
 
@@ -1217,7 +1461,7 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload, onOpen }) {
                   <button class="kill" title="Remove"
                     onClick=${() => remove(m.id)}>×</button>
                   <button class="mealopen"
-                    onClick=${() => onOpen(recipes.find((r) => r.id === m.recipe_id))}>
+                    onClick=${() => onOpen(recipes.find((r) => r.id === m.recipe_id), m)}>
                     <span class="slot">${m.meal_slot}</span>
                     <span class="mealname">${m.recipes?.title || "—"}</span>
                     <span class="srv">${m.servings} servings</span>
@@ -1231,7 +1475,13 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload, onOpen }) {
       ${picker && html`<${MealPicker} household=${household} recipes=${recipes}
         date=${picker.date} preselect=${picker.recipeId}
         onClose=${() => setPicker(null)}
-        onSaved=${() => { setPicker(null); reload(); }} />`}
+        onSaved=${(created) => {
+          setPicker(null);
+          reload();
+          if (created) {
+            onOpen(recipes.find((r) => r.id === created.recipe_id), created, true);
+          }
+        }} />`}
     </div>`;
 }
 
@@ -1614,6 +1864,8 @@ function App() {
       .on("postgres_changes",
         { event: "*", schema: "public", table: "meal_plan",
           filter: `household_id=eq.${household.id}` }, load)
+      .on("postgres_changes",
+        { event: "*", schema: "public", table: "meal_tweaks" }, load)
       .subscribe();
     return () => { sb.removeChannel(ch); };
   }, [household, load]);
@@ -1652,7 +1904,8 @@ function App() {
         ${tab === "plan" && html`<${PlanTab} household=${household}
           recipes=${recipes} meals=${meals} week=${week} setWeek=${setWeek}
           reload=${load}
-          onOpen=${(r) => r && setViewing({ recipe: r, own: true })} />`}
+          onOpen=${(r, m, adjust) => r
+            && setViewing({ recipe: r, own: true, meal: m, adjust })} />`}
 
         ${tab === "recipes" && html`<${RecipesTab} household=${household}
           mine=${recipes} library=${library} catalog=${catalog} reload=${load}
@@ -1675,8 +1928,10 @@ function App() {
       </main>
 
       ${viewing && html`<${RecipeViewer} recipe=${viewing.recipe}
-        own=${viewing.own}
+        own=${viewing.own} meal=${viewing.meal}
+        household=${household} catalog=${catalog}
         onClose=${() => setViewing(null)}
+        onChanged=${load}
         onEdit=${() => { setEditingFromView(viewing.recipe); setViewing(null); }} />`}
 
       ${editingFromView && html`<${RecipeEditor} household=${household}
