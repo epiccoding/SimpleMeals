@@ -74,6 +74,57 @@ function showQty(qty, canonUnit, system) {
 }
 
 /* ============================================================
+   Photos
+   ============================================================ */
+
+const BUCKET = "recipe-photos";
+const MAX_EDGE = 1200;
+
+function photoUrl(path) {
+  if (!path) return null;
+  return sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+}
+
+/** Whether a recipe's photo should be shown to this viewer. */
+function photoVisible(recipe, own) {
+  if (!recipe.image_path) return false;
+  return own || recipe.share_photo;
+}
+
+/**
+ * Scale down and re-encode as JPEG before upload. A phone photo is
+ * 3–5 MB; a recipe card needs about 150 KB. This also sidesteps HEIC
+ * on iPhones, where the file picker hands over a JPEG anyway.
+ */
+async function shrink(file) {
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    const url = URL.createObjectURL(file);
+    el.onload = () => { URL.revokeObjectURL(url); resolve(el); };
+    el.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(
+        "This browser can't read that image file. If it came off an iPhone " +
+        "as HEIC, save it as JPEG first, or upload from the phone instead."));
+    };
+    el.src = url;
+  });
+
+  const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.82));
+  if (!blob) throw new Error("Could not process that image.");
+  return blob;
+}
+
+/* ============================================================
    Dates
    ============================================================ */
 
@@ -348,8 +399,30 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  const [photoFile, setPhotoFile] = useState(null);
+  const [preview, setPreview] = useState(
+    () => (recipe?.image_path ? photoUrl(recipe.image_path) : null));
+  const [dropPhoto, setDropPhoto] = useState(false);
+  const [sharePhoto, setSharePhoto] = useState(recipe?.share_photo ?? true);
+
   const setRow = (i, patch) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  const choosePhoto = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setErr("");
+    setPhotoFile(file);
+    setDropPhoto(false);
+    setPreview(URL.createObjectURL(file));
+  };
+
+  const clearPhoto = () => {
+    setPhotoFile(null);
+    setPreview(null);
+    setDropPhoto(true);
+  };
 
   const resolve = async (name, unit) => {
     const clean = name.trim();
@@ -384,6 +457,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
         title: title.trim(),
         servings: Number(servings) || 4,
         is_public: isPublic,
+        share_photo: sharePhoto,
         instructions: instructions.trim() || null,
       };
 
@@ -414,6 +488,25 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
       const { error: ie } = await sb.from("recipe_ingredients").insert(lines);
       if (ie) throw ie;
 
+      // Photo last: it needs the recipe id, and a failure here shouldn't
+      // cost the person their typing.
+      const oldPath = recipe?.image_path || null;
+      if (photoFile) {
+        const blob = await shrink(photoFile);
+        const tag = Math.random().toString(36).slice(2, 10);
+        const path = `${household.id}/${recipeId}-${tag}.jpg`;
+        const { error: ue } = await sb.storage.from(BUCKET)
+          .upload(path, blob, { contentType: "image/jpeg", upsert: true });
+        if (ue) throw ue;
+        await sb.from("recipes").update({ image_path: path }).eq("id", recipeId);
+        if (oldPath && oldPath !== path) {
+          await sb.storage.from(BUCKET).remove([oldPath]);
+        }
+      } else if (dropPhoto && oldPath) {
+        await sb.from("recipes").update({ image_path: null }).eq("id", recipeId);
+        await sb.storage.from(BUCKET).remove([oldPath]);
+      }
+
       onSaved();
     } catch (e) {
       setErr(e.message || "Could not save the recipe.");
@@ -439,6 +532,29 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
         <input type="number" min="1" value=${servings}
           onInput=${(e) => setServings(e.target.value)} />
       </label>
+
+      <div class="field">
+        <span>Photo</span>
+        ${preview && html`
+          <div class="shotwrap">
+            <img class="shot" src=${preview} alt="" />
+            ${busy && photoFile && html`<div class="busy">Uploading…</div>`}
+          </div>`}
+        <div class="row wrap" style="margin-top:${preview ? "10px" : "0"}">
+          <label class="pickphoto">
+            ${preview ? "Replace photo" : "Add a photo"}
+            <input type="file" accept="image/*" onChange=${choosePhoto} />
+          </label>
+          ${preview && html`
+            <button class="btn quiet" onClick=${clearPhoto}>Remove photo</button>`}
+        </div>
+        ${isPublic && preview && html`
+          <label class="row small" style="margin-top:10px">
+            <input type="checkbox" checked=${sharePhoto}
+              onChange=${(e) => setSharePhoto(e.target.checked)} />
+            <span>Show the photo in the library too</span>
+          </label>`}
+      </div>
 
       <p class="sign muted" style="font-size:13px;margin:18px 0 8px">Ingredients</p>
       ${rows.map((r, i) => html`
@@ -633,6 +749,7 @@ function RecipesTab({ household, mine, library, catalog, reload }) {
   const [editing, setEditing] = useState(null);
   const [view, setView] = useState("mine");
   const [busy, setBusy] = useState("");
+  const [photosOnly, setPhotosOnly] = useState(false);
 
   const remove = async (r) => {
     if (!confirm(`Delete "${r.title}"? Meals already on the calendar will go too.`)) return;
@@ -669,29 +786,49 @@ function RecipesTab({ household, mine, library, catalog, reload }) {
     reload();
   };
 
-  const shown = view === "mine" ? mine : library;
+  const own = view === "mine";
+  const pool = own ? mine : library;
+  const shown = photosOnly
+    ? pool.filter((r) => photoVisible(r, own))
+    : pool;
+  const withPhotos = pool.filter((r) => photoVisible(r, own)).length;
 
   return html`
     <div>
-      <div class="row" style="margin-bottom:16px">
-        <button class=${"btn sm " + (view === "mine" ? "" : "ghost")}
+      <div class="row wrap" style="margin-bottom:16px">
+        <button class=${"btn sm " + (own ? "" : "ghost")}
           onClick=${() => setView("mine")}>Ours (${mine.length})</button>
-        <button class=${"btn sm " + (view === "library" ? "" : "ghost")}
+        <button class=${"btn sm " + (!own ? "" : "ghost")}
           onClick=${() => setView("library")}>Library (${library.length})</button>
         <span class="spacer"></span>
         <button class="btn sm" onClick=${() => setEditing({})}>New recipe</button>
       </div>
 
+      ${withPhotos > 0 && html`
+        <div class="row small" style="margin:-6px 0 14px">
+          <button class=${"btn sm " + (photosOnly ? "" : "ghost")}
+            onClick=${() => setPhotosOnly(!photosOnly)}>
+            With photos (${withPhotos})
+          </button>
+          ${photosOnly && html`<span class="muted">Showing only the ones
+            somebody has actually cooked.</span>`}
+        </div>`}
+
       ${!shown.length && html`
         <div class="empty">
-          <p>${view === "mine"
-            ? "Nothing here yet. Add a recipe, or copy one from the library."
-            : "The library is empty. Share one of yours to start it off."}</p>
+          <p>${photosOnly
+            ? "No photos here yet. Cook something and add one."
+            : own
+              ? "Nothing here yet. Add a recipe, or copy one from the library."
+              : "The library is empty. Share one of yours to start it off."}</p>
         </div>`}
 
       <div class="recipes">
         ${shown.map((r) => html`
           <div class="recipe" key=${r.id}>
+            ${photoVisible(r, own) && html`
+              <img class="shot" src=${photoUrl(r.image_path)} alt=""
+                loading="lazy" />`}
             <h3>${r.title}</h3>
             <div class="meta">Serves ${r.servings} ·
               ${r.recipe_ingredients?.length || 0} ingredients</div>
