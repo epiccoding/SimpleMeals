@@ -250,8 +250,10 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 }
 
 /* ---------- ingredient editor rows ---------- */
-.ing{display:grid;grid-template-columns:1fr 74px 92px 32px;gap:6px;margin-bottom:6px;align-items:start}
+.ing{display:grid;grid-template-columns:1fr 88px 92px 32px;gap:6px;margin-bottom:6px;align-items:start}
 .ing input,.ing select{padding:8px 9px}
+.ing input.q{text-align:center}
+.ing input.bad{border-color:var(--danger);background:#FCF1EE}
 @media (max-width:520px){
   .ing{grid-template-columns:1fr 1fr;grid-template-areas:"n n" "q u" "d d"}
   .ing .n{grid-area:n}.ing .q{grid-area:q}.ing .u{grid-area:u}.ing .d{grid-area:d;justify-self:end}
@@ -269,6 +271,7 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 }
 .hint .ok{color:var(--brand)}
 .hint .ok::before{content:"↳ "}
+.hint .warn{color:var(--danger);font-weight:600}
 .hint .new{
   font-family:var(--sign);font-weight:600;text-transform:uppercase;
   letter-spacing:.08em;font-size:11px;color:#7A5B12;

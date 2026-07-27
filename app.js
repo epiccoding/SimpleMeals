@@ -194,8 +194,8 @@ function unvulgar(text) {
 function readNumber(text) {
   const s = text.trim();
 
-  // 1 1/2  or  1-1/2
-  let m = s.match(/^(\d+)\s*[-–\s]\s*(\d+)\s*\/\s*(\d+)\b/);
+  // 1 1/2  ·  1-1/2  ·  1 and 1/2
+  let m = s.match(/^(\d+)\s*(?:[-–]\s*|\s+and\s+|\s+)(\d+)\s*\/\s*(\d+)\b/);
   if (m) return { qty: +m[1] + +m[2] / +m[3], rest: s.slice(m[0].length) };
 
   // 2 to 3  or  2-3  (take the smaller; you can always buy more)
@@ -280,6 +280,15 @@ function matchCatalog(name, catalog) {
     if (hit) return { hit, dropped };
   }
   return { hit: null, dropped, cleaned: stripped };
+}
+
+/** Read a quantity box that may hold "1 1/2", "½", ".75", or "2". */
+function toNumber(text) {
+  if (text === null || text === undefined) return null;
+  const s = String(text).trim();
+  if (!s) return null;
+  const { qty } = readNumber(unvulgar(s));
+  return qty;
 }
 
 /** Parse one written line into editor fields. Returns null if unusable. */
@@ -713,9 +722,18 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
   };
 
   const save = async () => {
-    const usable = rows.filter((r) => r.name.trim() && Number(r.quantity) > 0);
+    const named = rows.filter((r) => r.name.trim());
     if (!title.trim()) { setErr("Give the recipe a name."); return; }
-    if (!usable.length) { setErr("Add at least one ingredient with a quantity."); return; }
+    if (!named.length) { setErr("Add at least one ingredient."); return; }
+
+    // Never drop a row quietly. If a quantity can't be read, say which.
+    const unreadable = named.filter((r) => !(toNumber(r.quantity) > 0));
+    if (unreadable.length) {
+      setErr(`Need a quantity for: ${unreadable.map((r) => r.name.trim()).join(", ")}. ` +
+             `Fractions are fine — "1 1/2" or "½" both work.`);
+      return;
+    }
+    const usable = named;
 
     setBusy(true); setErr("");
     try {
@@ -746,7 +764,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
         lines.push({
           recipe_id: recipeId,
           ingredient_id: await resolve(r.name, r.unit),
-          quantity: Number(r.quantity),
+          quantity: toNumber(r.quantity),
           unit: r.unit,
           note: r.note.trim() || null,
           sort_order: i,
@@ -850,6 +868,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
         const found = r.name.trim() ? matchCatalog(r.name, catalog) : null;
         const hit = found?.hit;
         const novel = r.name.trim() && !hit;
+        const badQty = r.name.trim() && r.quantity.trim() && !(toNumber(r.quantity) > 0);
         return html`
         <div key=${i}>
           <div class="ing">
@@ -858,9 +877,13 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
               onInput=${(e) => setRow(i, { name: e.target.value })}
               onBlur=${() => tidyRow(i)}
               onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); tidyRow(i); } }} />
-            <input class="q" type="number" step="any" min="0" value=${r.quantity}
-              placeholder="Qty"
-              onInput=${(e) => setRow(i, { quantity: e.target.value })} />
+            <input class=${"q" + (badQty ? " bad" : "")} type="text"
+              inputmode="text" value=${r.quantity} placeholder="1 1/2"
+              onInput=${(e) => setRow(i, { quantity: e.target.value })}
+              onBlur=${() => {
+                const n = toNumber(rows[i].quantity);
+                if (n !== null) setRow(i, { quantity: String(n) });
+              }} />
             <select class="u" value=${r.unit}
               onChange=${(e) => setRow(i, { unit: e.target.value })}>
               ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
@@ -868,8 +891,9 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
             <button class="d btn quiet" title="Remove"
               onClick=${() => setRows((rs) => rs.filter((_, j) => j !== i))}>×</button>
           </div>
-          ${(hit || novel || r.note) && html`
+          ${(hit || novel || r.note || badQty) && html`
             <div class="hint">
+              ${badQty && html`<span class="warn">can't read that quantity</span>`}
               ${hit && hit.name.toLowerCase() !== r.name.trim().toLowerCase()
                 && html`<span class="ok">adds up with “${hit.name}”</span>`}
               ${novel && html`<span class="new">new ingredient</span>`}
