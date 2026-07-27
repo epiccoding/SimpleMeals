@@ -125,6 +125,234 @@ async function shrink(file) {
 }
 
 /* ============================================================
+   Reading ingredient lines the way people write them
+
+   "1 1/2 cups all-purpose flour, sifted"
+     -> 1.5 · cup · all-purpose flour · (sifted)
+
+   Everything parsed is shown in the normal editor fields before it's
+   saved, so a wrong guess is visible and fixable rather than silent.
+   ============================================================ */
+
+const VULGAR = {
+  "½": "1/2", "⅓": "1/3", "⅔": "2/3", "¼": "1/4", "¾": "3/4",
+  "⅕": "1/5", "⅖": "2/5", "⅗": "3/5", "⅘": "4/5", "⅙": "1/6",
+  "⅚": "5/6", "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8",
+};
+
+const WORD_NUMBERS = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  dozen: 12, half: 0.5, quarter: 0.25,
+};
+
+// Only real measures live here. Words like "large" or "can" stay in the
+// ingredient name, because "large egg" and "can diced tomatoes" are what
+// you actually shop for.
+const UNIT_WORDS = {
+  tsp: ["tsp", "tsps", "teaspoon", "teaspoons"],
+  tbsp: ["tbsp", "tbsps", "tbs", "tablespoon", "tablespoons"],
+  cup: ["cup", "cups"],
+  floz: ["floz", "fl oz", "fluid ounce", "fluid ounces"],
+  ml: ["ml", "milliliter", "milliliters", "millilitre", "millilitres"],
+  l: ["l", "liter", "liters", "litre", "litres"],
+  pint: ["pint", "pints", "pt"],
+  quart: ["quart", "quarts", "qt"],
+  g: ["g", "gr", "gram", "grams"],
+  kg: ["kg", "kilo", "kilos", "kilogram", "kilograms"],
+  oz: ["oz", "ounce", "ounces"],
+  lb: ["lb", "lbs", "pound", "pounds"],
+  clove: ["clove", "cloves"],
+  slice: ["slice", "slices"],
+};
+
+const UNIT_LOOKUP = (() => {
+  const m = new Map();
+  for (const [unit, words] of Object.entries(UNIT_WORDS)) {
+    for (const w of words) m.set(w, unit);
+  }
+  return m;
+})();
+
+// Prep instructions, not part of what you buy. Moved to the note.
+const PREP_WORDS = [
+  "fresh", "freshly", "ripe", "chopped", "diced", "minced", "sliced",
+  "shredded", "grated", "softened", "melted", "cooked", "raw", "peeled",
+  "seeded", "rinsed", "drained", "packed", "sifted", "beaten", "warm",
+  "cold", "room temperature", "unsalted", "salted", "extra virgin",
+  "boneless", "skinless", "finely", "roughly", "thinly",
+];
+
+function unvulgar(text) {
+  let out = text;
+  for (const [glyph, plain] of Object.entries(VULGAR)) {
+    out = out.split(glyph).join(" " + plain + " ");
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+function readNumber(text) {
+  const s = text.trim();
+
+  // 1 1/2  or  1-1/2
+  let m = s.match(/^(\d+)\s*[-–\s]\s*(\d+)\s*\/\s*(\d+)\b/);
+  if (m) return { qty: +m[1] + +m[2] / +m[3], rest: s.slice(m[0].length) };
+
+  // 2 to 3  or  2-3  (take the smaller; you can always buy more)
+  m = s.match(/^(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*\d+(?:\.\d+)?(?!\s*\/)\b/);
+  if (m) return { qty: +m[1], rest: s.slice(m[0].length) };
+
+  // 3/4
+  m = s.match(/^(\d+)\s*\/\s*(\d+)\b/);
+  if (m) return { qty: +m[1] / +m[2], rest: s.slice(m[0].length) };
+
+  // 1.5  or  2
+  m = s.match(/^(\d*\.\d+|\d+)\b/);
+  if (m) return { qty: +m[1], rest: s.slice(m[0].length) };
+
+  // "two", "a", "half"
+  m = s.match(/^([a-z]+)\b/i);
+  if (m && WORD_NUMBERS[m[1].toLowerCase()] !== undefined) {
+    return { qty: WORD_NUMBERS[m[1].toLowerCase()], rest: s.slice(m[0].length) };
+  }
+
+  return { qty: null, rest: s };
+}
+
+function readUnit(text) {
+  const s = text.trim().replace(/^\.\s*/, "");
+
+  const two = s.match(/^([a-z]+\s+[a-z]+)\b\.?/i);
+  if (two && UNIT_LOOKUP.has(two[1].toLowerCase())) {
+    return { unit: UNIT_LOOKUP.get(two[1].toLowerCase()), rest: s.slice(two[0].length) };
+  }
+
+  const one = s.match(/^([a-z]+)\b\.?/i);
+  if (one && UNIT_LOOKUP.has(one[1].toLowerCase())) {
+    return { unit: UNIT_LOOKUP.get(one[1].toLowerCase()), rest: s.slice(one[0].length) };
+  }
+
+  return { unit: null, rest: s };
+}
+
+function singular(word) {
+  const w = word.toLowerCase();
+  if (/(ss|us|is|ies)$/.test(w) && !/ies$/.test(w)) return w;
+  if (/ies$/.test(w)) return w.slice(0, -3) + "y";
+  if (/(ch|sh|x|z|s)es$/.test(w)) return w.slice(0, -2);
+  if (/oes$/.test(w)) return w.slice(0, -2);
+  if (/s$/.test(w) && !/ss$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+function singularPhrase(phrase) {
+  const parts = phrase.trim().split(/\s+/);
+  if (!parts.length) return phrase;
+  parts[parts.length - 1] = singular(parts[parts.length - 1]);
+  return parts.join(" ");
+}
+
+/**
+ * Reuse an ingredient that already exists rather than making a near
+ * duplicate. This is what stops "egg" and "large egg" becoming two
+ * separate things that never add together on the list.
+ */
+function matchCatalog(name, catalog) {
+  if (!name || !catalog?.length) return null;
+  const raw = name.trim().toLowerCase();
+
+  let stripped = raw;
+  const dropped = [];
+  for (const word of PREP_WORDS) {
+    const re = new RegExp(`\\b${word}\\b`, "g");
+    if (re.test(stripped)) {
+      dropped.push(word);
+      stripped = stripped.replace(re, " ");
+    }
+  }
+  stripped = stripped.replace(/\s+/g, " ").trim();
+
+  const tries = [raw, singularPhrase(raw), stripped, singularPhrase(stripped)]
+    .filter(Boolean);
+
+  for (const attempt of tries) {
+    const hit = catalog.find((c) => c.name.toLowerCase() === attempt);
+    if (hit) return { hit, dropped };
+  }
+  return { hit: null, dropped, cleaned: stripped };
+}
+
+/** Parse one written line into editor fields. Returns null if unusable. */
+function parseLine(line, catalog) {
+  if (!line || !line.trim()) return null;
+
+  let text = unvulgar(line)
+    .replace(/^[-–—*•\d]+[.)]?\s+/, (m) => (/^\d/.test(m.trim()) ? m : ""))
+    .trim();
+
+  const notes = [];
+
+  // Trailing or inline parenthetical is a note, not a name
+  text = text.replace(/\(([^)]*)\)/g, (_, inner) => {
+    notes.push(inner.trim());
+    return " ";
+  }).replace(/\s+/g, " ").trim();
+
+  const num = readNumber(text);
+  const un = readUnit(num.rest);
+
+  let rest = un.rest.replace(/^\s*(of|de)\s+/i, "").trim();
+
+  // Anything after the first comma is preparation
+  const comma = rest.indexOf(",");
+  if (comma > -1) {
+    notes.push(rest.slice(comma + 1).trim());
+    rest = rest.slice(0, comma).trim();
+  }
+
+  if (/\bto taste\b/i.test(rest)) {
+    notes.push("to taste");
+    rest = rest.replace(/\bto taste\b/i, "").trim();
+  }
+
+  rest = rest.replace(/[.;]+$/, "").trim();
+  if (!rest) return null;
+
+  const match = matchCatalog(rest, catalog);
+
+  // "2 cloves garlic" should find the existing "garlic clove"
+  let unit = un.unit;
+  let hit = match?.hit || null;
+  if (!hit && (unit === "clove" || unit === "slice")) {
+    const alt = matchCatalog(`${rest} ${unit}`, catalog);
+    if (alt?.hit) { hit = alt.hit; unit = "count"; }
+  }
+
+  let name;
+  if (hit) {
+    name = hit.name;
+    if (match?.dropped?.length) notes.push(...match.dropped);
+  } else {
+    // No existing match, so drop preparation words from the name and
+    // keep them as notes instead of baking them into a new ingredient.
+    name = singularPhrase(match?.cleaned || rest);
+    if (match?.dropped?.length) notes.push(...match.dropped);
+  }
+
+  if (!name) name = singularPhrase(rest);
+  if (!unit) unit = "count";
+
+  return {
+    qty: num.qty === null ? 1 : num.qty,
+    unit,
+    name,
+    note: notes.filter(Boolean).join(", "),
+    matched: hit,
+    guessedQty: num.qty === null,
+  };
+}
+
+/* ============================================================
    Dates
    ============================================================ */
 
@@ -424,6 +652,45 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
     setDropPhoto(true);
   };
 
+  const [bulk, setBulk] = useState("");
+  const [showBulk, setShowBulk] = useState(false);
+
+  /** Typed "1 tsp sugar" into the name box? Split it into the fields. */
+  const tidyRow = (i) => {
+    const row = rows[i];
+    if (!row.name || !/\d|\s/.test(row.name)) return;
+    const parsed = parseLine(row.name, catalog);
+    if (!parsed || !parsed.name) return;
+    if (parsed.name === row.name && parsed.guessedQty) return;
+    setRow(i, {
+      name: parsed.name,
+      quantity: parsed.guessedQty && row.quantity ? row.quantity : String(parsed.qty),
+      unit: parsed.unit,
+      note: [row.note, parsed.note].filter(Boolean).join(", "),
+    });
+  };
+
+  const applyBulk = () => {
+    const parsed = bulk
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => parseLine(l, catalog))
+      .filter(Boolean);
+
+    if (!parsed.length) { setErr("Nothing readable in there."); return; }
+
+    setRows(parsed.map((p) => ({
+      name: p.name,
+      quantity: String(p.qty),
+      unit: p.unit,
+      note: p.note || "",
+    })));
+    setBulk("");
+    setShowBulk(false);
+    setErr("");
+  };
+
   const resolve = async (name, unit) => {
     const clean = name.trim();
     const hit = catalog.find((c) => c.name.toLowerCase() === clean.toLowerCase());
@@ -556,22 +823,60 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
           </label>`}
       </div>
 
-      <p class="sign muted" style="font-size:13px;margin:18px 0 8px">Ingredients</p>
-      ${rows.map((r, i) => html`
-        <div class="ing" key=${i}>
-          <input class="n" type="text" list="known-ingredients" value=${r.name}
-            placeholder="Ingredient"
-            onInput=${(e) => setRow(i, { name: e.target.value })} />
-          <input class="q" type="number" step="any" min="0" value=${r.quantity}
-            placeholder="Qty"
-            onInput=${(e) => setRow(i, { quantity: e.target.value })} />
-          <select class="u" value=${r.unit}
-            onChange=${(e) => setRow(i, { unit: e.target.value })}>
-            ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
-          </select>
-          <button class="d btn quiet" title="Remove"
-            onClick=${() => setRows((rs) => rs.filter((_, j) => j !== i))}>×</button>
-        </div>`)}
+      <div class="row" style="margin:18px 0 8px">
+        <p class="sign muted" style="font-size:13px;margin:0">Ingredients</p>
+        <span class="spacer"></span>
+        <button class="btn quiet" onClick=${() => setShowBulk(!showBulk)}>
+          ${showBulk ? "Never mind" : "Paste a list"}
+        </button>
+      </div>
+
+      ${showBulk && html`
+        <div class="paster">
+          <p class="small muted" style="margin:0 0 8px">
+            Paste ingredients from anywhere, one per line. Write them however
+            they're written — “1 1/2 cups flour, sifted” is fine.
+          </p>
+          <textarea value=${bulk} placeholder=${"2 tbsp olive oil\n1 1/2 cups flour\n3 cloves garlic, minced\n1 lb chicken breast"}
+            onInput=${(e) => setBulk(e.target.value)}></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn sm" onClick=${applyBulk}>Read the list</button>
+            <span class="small muted">Replaces what's below. You can fix
+              anything after.</span>
+          </div>
+        </div>`}
+
+      ${rows.map((r, i) => {
+        const found = r.name.trim() ? matchCatalog(r.name, catalog) : null;
+        const hit = found?.hit;
+        const novel = r.name.trim() && !hit;
+        return html`
+        <div key=${i}>
+          <div class="ing">
+            <input class="n" type="text" list="known-ingredients" value=${r.name}
+              placeholder="Ingredient, or “1 tsp sugar”"
+              onInput=${(e) => setRow(i, { name: e.target.value })}
+              onBlur=${() => tidyRow(i)}
+              onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); tidyRow(i); } }} />
+            <input class="q" type="number" step="any" min="0" value=${r.quantity}
+              placeholder="Qty"
+              onInput=${(e) => setRow(i, { quantity: e.target.value })} />
+            <select class="u" value=${r.unit}
+              onChange=${(e) => setRow(i, { unit: e.target.value })}>
+              ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+            </select>
+            <button class="d btn quiet" title="Remove"
+              onClick=${() => setRows((rs) => rs.filter((_, j) => j !== i))}>×</button>
+          </div>
+          ${(hit || novel || r.note) && html`
+            <div class="hint">
+              ${hit && hit.name.toLowerCase() !== r.name.trim().toLowerCase()
+                && html`<span class="ok">adds up with “${hit.name}”</span>`}
+              ${novel && html`<span class="new">new ingredient</span>`}
+              ${r.note && html`<span class="muted">${r.note}</span>`}
+            </div>`}
+        </div>`;
+      })}
       <button class="btn ghost sm" onClick=${() => setRows((rs) => [...rs, blankIng()])}>
         Add ingredient
       </button>
@@ -706,8 +1011,6 @@ function PlanTab({ household, recipes, meals, week, setWeek, reload }) {
         <button onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
         <button onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
         <span class="label">${spanLabel(week)}</span>
-        <span class="spacer"></span>
-        <button class="btn sm" onClick=${() => setPicker({ date: today })}>Add meal</button>
       </div>
 
       <div class="days">

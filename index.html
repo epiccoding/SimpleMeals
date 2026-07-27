@@ -257,6 +257,24 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
   .ing .n{grid-area:n}.ing .q{grid-area:q}.ing .u{grid-area:u}.ing .d{grid-area:d;justify-self:end}
 }
 
+/* ---------- ingredient parsing aids ---------- */
+.paster{
+  background:var(--card);border:1.5px solid var(--line);
+  border-radius:var(--r);padding:12px;margin-bottom:14px;
+}
+.paster textarea{min-height:130px;font-size:15px}
+.hint{
+  display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;
+  font-size:12.5px;margin:-2px 0 8px 2px;
+}
+.hint .ok{color:var(--brand)}
+.hint .ok::before{content:"↳ "}
+.hint .new{
+  font-family:var(--sign);font-weight:600;text-transform:uppercase;
+  letter-spacing:.08em;font-size:11px;color:#7A5B12;
+  background:#FBF4E2;border-radius:99px;padding:1px 7px;
+}
+
 /* ---------- modal ---------- */
 .veil{
   position:fixed;inset:0;background:rgba(19,34,29,.55);z-index:40;
