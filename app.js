@@ -327,12 +327,22 @@ function toNumber(text) {
   return qty;
 }
 
-/** Parse one written line into editor fields. Returns null if unusable. */
-function parseLine(line, catalog) {
+/**
+ * Parse one written line into editor fields. Returns null if unusable.
+ *
+ * `cautious` is for single-field boxes where the text is probably just a
+ * name. Plenty of groceries open with a number — "90 second rice",
+ * "2% milk", "7 grain bread" — and mangling those is far more annoying
+ * than failing to split out a quantity that's one box to the right
+ * anyway. Bulk paste stays greedy, because recipe lines really do lead
+ * with amounts.
+ */
+function parseLine(line, catalog, opts = {}) {
   if (!line || !line.trim()) return null;
+  const cautious = !!opts.cautious;
 
   let text = unvulgar(line)
-    .replace(/^[-–—*•\d]+[.)]?\s+/, (m) => (/^\d/.test(m.trim()) ? m : ""))
+    .replace(/^[-–—*•]\s+/, "")
     .trim();
 
   const notes = [];
@@ -343,17 +353,49 @@ function parseLine(line, catalog) {
     return " ";
   }).replace(/\s+/g, " ").trim();
 
+  // Anything after the first comma is preparation
+  const comma = text.indexOf(",");
+  let tail = "";
+  if (comma > -1) {
+    tail = text.slice(comma + 1).trim();
+    text = text.slice(0, comma).trim();
+  }
+
+  // If the whole thing names something already on the shelf, it's a name.
+  // This is what rescues "90 second rice bag" once it exists.
+  const whole = matchCatalog(text, catalog);
+  if (whole?.exact) {
+    if (tail) notes.push(tail);
+    return {
+      qty: 1,
+      unit: whole.hit.canonical_unit === "count" ? "count" : "count",
+      name: whole.hit.name,
+      note: notes.filter(Boolean).join(", "),
+      matched: whole.hit,
+      suggest: null,
+      guessedQty: true,
+    };
+  }
+
   const num = readNumber(text);
   const un = readUnit(num.rest);
 
-  let rest = un.rest.replace(/^\s*(of|de)\s+/i, "").trim();
+  let takeNumber = num.qty !== null;
 
-  // Anything after the first comma is preparation
-  const comma = rest.indexOf(",");
-  if (comma > -1) {
-    notes.push(rest.slice(comma + 1).trim());
-    rest = rest.slice(0, comma).trim();
+  // "2% milk" — a percent sign is never a measurement here
+  if (takeNumber && /^\s*%/.test(num.rest)) takeNumber = false;
+
+  // In cautious mode a bare number only counts when a unit follows it, or
+  // when what's left is an ingredient we already know.
+  if (takeNumber && cautious && !un.unit) {
+    const rest = num.rest.replace(/^\s*(of)\s+/i, "").trim();
+    const known = rest ? matchCatalog(rest, catalog) : null;
+    if (!known?.exact) takeNumber = false;
   }
+
+  let rest = takeNumber ? un.rest : text;
+  rest = rest.replace(/^\s*(of|de)\s+/i, "").trim();
+  if (tail) notes.push(tail);
 
   if (/\bto taste\b/i.test(rest)) {
     notes.push("to taste");
@@ -366,7 +408,7 @@ function parseLine(line, catalog) {
   const match = matchCatalog(rest, catalog);
 
   // "2 cloves garlic" should find the existing "garlic clove"
-  let unit = un.unit;
+  let unit = takeNumber ? un.unit : null;
   let hit = match?.exact ? match.hit : null;
   let suggest = match?.exact ? null : match?.hit || null;
 
@@ -382,13 +424,13 @@ function parseLine(line, catalog) {
   if (!unit) unit = "count";
 
   return {
-    qty: num.qty === null ? 1 : num.qty,
+    qty: takeNumber ? num.qty : 1,
     unit,
     name,
     note: notes.filter(Boolean).join(", "),
     matched: hit,
     suggest,
-    guessedQty: num.qty === null,
+    guessedQty: !takeNumber,
   };
 }
 
@@ -1148,7 +1190,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
   const tidyRow = (i) => {
     const row = rows[i];
     if (!row.name.trim()) return;
-    const parsed = parseLine(row.name, catalog);
+    const parsed = parseLine(row.name, catalog, { cautious: true });
     if (!parsed || !parsed.name || parsed.guessedQty) return;
     setRow(i, {
       name: parsed.name,
@@ -1335,6 +1377,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
           <div class="ing">
             <input class="n" type="text" list="known-ingredients" value=${r.name}
               placeholder="Ingredient, or “1 tsp sugar”"
+              title="Names with numbers are kept as written — 90 second rice stays 90 second rice"
               onInput=${(e) => setRow(i, { name: e.target.value })}
               onBlur=${() => tidyRow(i)}
               onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); tidyRow(i); } }} />
@@ -1561,7 +1604,7 @@ function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reloa
     if (!text) return;
     setBusy(true); setErr("");
     try {
-      const parsed = parseLine(text, catalog);
+      const parsed = parseLine(text, catalog, { cautious: true });
       if (!parsed?.name) throw new Error("Couldn't read that.");
       const id = await resolveIngredient(parsed.name, parsed.unit, catalog);
       const { error } = await sb.from("pantry_items").upsert({
