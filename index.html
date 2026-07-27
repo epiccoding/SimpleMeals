@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SimpleMeals</title>
+<meta name="theme-color" content="#14503A">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#F4F5F3;
+  --card:#FFFFFF;
+  --ink:#172420;
+  --brand:#1F6E4E;
+  --brand-deep:#14503A;
+  --accent:#E8B33C;
+  --muted:#6E7A73;
+  --line:#DCE2DA;
+  --danger:#A6412F;
+
+  --sign:"Barlow Condensed",Impact,sans-serif;
+  --body:"Instrument Sans",system-ui,sans-serif;
+  --num:"IBM Plex Mono",ui-monospace,monospace;
+
+  --r:10px;
+  --pad:16px;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
+:focus-visible{outline:2.5px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* ---------- signage type ---------- */
+.sign{
+  font-family:var(--sign);
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:.09em;
+  line-height:1;
+}
+.num{font-family:var(--num);font-variant-numeric:tabular-nums}
+
+/* ---------- chrome ---------- */
+.topbar{
+  background:var(--brand-deep);
+  color:#F2F7F3;
+  padding:calc(env(safe-area-inset-top) + 12px) var(--pad) 12px;
+  display:flex;align-items:baseline;gap:10px;
+}
+.wordmark{font-family:var(--sign);font-weight:700;font-size:26px;letter-spacing:.02em;text-transform:uppercase}
+.wordmark em{font-style:normal;color:var(--accent)}
+.topbar .who{margin-left:auto;font-size:13px;opacity:.75;letter-spacing:.02em}
+.topbar .who button{
+  background:none;border:0;color:inherit;text-decoration:underline;
+  cursor:pointer;padding:0 0 0 10px;font-size:13px;
+}
+
+main{max-width:960px;margin:0 auto;padding:var(--pad) var(--pad) 96px}
+
+/* ---------- tabs ---------- */
+.tabs{
+  position:fixed;left:0;right:0;bottom:0;z-index:20;
+  display:grid;grid-template-columns:repeat(3,1fr);
+  background:var(--card);border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.tabs button{
+  background:none;border:0;cursor:pointer;padding:11px 4px 13px;
+  font-family:var(--sign);font-weight:600;text-transform:uppercase;
+  letter-spacing:.1em;font-size:14px;color:var(--muted);
+  border-top:3px solid transparent;margin-top:-1px;
+}
+.tabs button[aria-current="true"]{color:var(--brand-deep);border-top-color:var(--accent)}
+.tabs .badge{
+  font-family:var(--num);font-size:11px;letter-spacing:0;
+  background:var(--brand);color:#fff;border-radius:99px;
+  padding:1px 6px;margin-left:6px;vertical-align:1px;
+}
+@media (min-width:720px){
+  .tabs{
+    position:static;grid-template-columns:repeat(3,max-content);
+    border-top:0;border-bottom:1px solid var(--line);background:transparent;
+    max-width:960px;margin:0 auto;padding:0 var(--pad);gap:4px;
+  }
+  .tabs button{border-top:0;border-bottom:3px solid transparent;padding:14px 18px}
+  .tabs button[aria-current="true"]{border-bottom-color:var(--accent)}
+  main{padding-bottom:48px}
+}
+
+/* ---------- generic bits ---------- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px}
+.stack{display:flex;flex-direction:column;gap:12px}
+.row{display:flex;align-items:center;gap:10px}
+.row.wrap{flex-wrap:wrap}
+.spacer{flex:1}
+.muted{color:var(--muted)}
+.small{font-size:13.5px}
+h2.sign{font-size:22px;margin:26px 0 12px}
+h2.sign:first-child{margin-top:0}
+
+.btn{
+  background:var(--brand);color:#fff;border:0;border-radius:8px;
+  padding:11px 16px;cursor:pointer;font-weight:600;font-size:15px;
+}
+.btn:hover{background:var(--brand-deep)}
+.btn.ghost{background:transparent;color:var(--brand-deep);border:1.5px solid var(--line)}
+.btn.ghost:hover{background:#EDF1EC;border-color:var(--brand)}
+.btn.quiet{background:none;color:var(--muted);padding:6px 8px;font-weight:500;font-size:14px;text-decoration:underline}
+.btn.quiet:hover{color:var(--danger);background:none}
+.btn.sm{padding:7px 11px;font-size:14px}
+.btn:disabled{opacity:.5;cursor:default}
+
+label.field{display:block;margin-bottom:12px}
+label.field > span{
+  display:block;font-family:var(--sign);font-weight:600;text-transform:uppercase;
+  letter-spacing:.09em;font-size:13px;color:var(--muted);margin-bottom:5px;
+}
+input[type=text],input[type=email],input[type=number],input[type=date],select,textarea{
+  width:100%;background:var(--card);border:1.5px solid var(--line);
+  border-radius:8px;padding:10px 12px;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--brand)}
+textarea{min-height:110px;resize:vertical;line-height:1.5}
+
+.notice{
+  border-left:4px solid var(--accent);background:#FBF4E2;
+  padding:11px 14px;border-radius:0 8px 8px 0;font-size:14.5px;
+}
+.notice.bad{border-color:var(--danger);background:#F8EBE7}
+
+/* ---------- signage bar: the aisle header ---------- */
+.aisle{
+  display:flex;align-items:center;gap:12px;
+  background:var(--brand-deep);color:#F2F7F3;
+  padding:7px 12px;border-radius:6px;margin:22px 0 2px;
+}
+.aisle .name{font-family:var(--sign);font-weight:700;letter-spacing:.14em;font-size:15px;text-transform:uppercase}
+.aisle .count{font-family:var(--num);font-size:12px;margin-left:auto;color:var(--accent)}
+
+/* ---------- receipt line with dotted leader ---------- */
+.line{
+  display:flex;align-items:baseline;gap:8px;
+  padding:11px 4px;border-bottom:1px solid var(--line);
+}
+.line .tick{
+  appearance:none;flex:none;width:21px;height:21px;margin:0;
+  border:2px solid var(--brand);border-radius:5px;background:var(--card);
+  cursor:pointer;position:relative;align-self:center;
+}
+.line .tick:checked{background:var(--brand);border-color:var(--brand)}
+.line .tick:checked::after{
+  content:"";position:absolute;left:5px;top:2px;width:6px;height:11px;
+  border:solid #fff;border-width:0 2.5px 2.5px 0;transform:rotate(42deg);
+}
+.line .what{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.line .leader{
+  flex:1;border-bottom:1.5px dotted var(--line);
+  transform:translateY(-4px);min-width:14px;
+}
+.line .qty{font-family:var(--num);font-size:14.5px;white-space:nowrap}
+.line.done .what,.line.done .qty{color:var(--muted);text-decoration:line-through}
+.line .from{font-size:12px;color:var(--muted);white-space:nowrap}
+.line .kill{
+  background:none;border:0;color:var(--muted);cursor:pointer;
+  font-size:18px;line-height:1;padding:0 2px;
+}
+.line .kill:hover{color:var(--danger)}
+
+/* ---------- week strip ---------- */
+.weeknav{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.weeknav .label{font-family:var(--sign);font-weight:600;letter-spacing:.08em;text-transform:uppercase;font-size:15px}
+.weeknav button{
+  background:var(--card);border:1.5px solid var(--line);border-radius:8px;
+  width:34px;height:34px;cursor:pointer;font-size:16px;line-height:1;
+}
+.weeknav button:hover{border-color:var(--brand)}
+
+.days{display:grid;gap:10px}
+@media (min-width:720px){.days{grid-template-columns:repeat(7,1fr);gap:8px}}
+.day{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:10px;min-height:96px}
+.day.today{border-color:var(--brand);box-shadow:inset 0 0 0 1px var(--brand)}
+.day .dow{font-family:var(--sign);font-weight:700;letter-spacing:.1em;font-size:13px;text-transform:uppercase;color:var(--brand-deep)}
+.day .dnum{font-family:var(--num);font-size:12px;color:var(--muted);margin-left:5px}
+.meal{
+  background:#EDF1EC;border-radius:6px;padding:6px 8px;margin-top:7px;
+  font-size:13.5px;line-height:1.3;position:relative;
+}
+.meal .slot{font-family:var(--sign);font-weight:600;text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:var(--brand)}
+.meal .srv{font-family:var(--num);font-size:11px;color:var(--muted)}
+.meal .kill{position:absolute;top:2px;right:4px;background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
+.meal .kill:hover{color:var(--danger)}
+.day .add{
+  width:100%;margin-top:7px;background:none;border:1.5px dashed var(--line);
+  border-radius:6px;padding:5px;cursor:pointer;color:var(--muted);font-size:13px;
+}
+.day .add:hover{border-color:var(--brand);color:var(--brand)}
+
+/* ---------- recipe cards ---------- */
+.recipes{display:grid;gap:10px}
+@media (min-width:620px){.recipes{grid-template-columns:1fr 1fr}}
+.recipe{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.recipe h3{margin:0 0 4px;font-size:17px;font-weight:600}
+.recipe .meta{font-family:var(--num);font-size:12px;color:var(--muted)}
+.pill{
+  font-family:var(--sign);font-weight:600;text-transform:uppercase;letter-spacing:.09em;
+  font-size:11px;padding:2px 7px;border-radius:99px;background:#EDF1EC;color:var(--brand-deep);
+}
+.pill.pub{background:var(--accent);color:#3A2A05}
+
+/* ---------- ingredient editor rows ---------- */
+.ing{display:grid;grid-template-columns:1fr 74px 92px 32px;gap:6px;margin-bottom:6px;align-items:start}
+.ing input,.ing select{padding:8px 9px}
+@media (max-width:520px){
+  .ing{grid-template-columns:1fr 1fr;grid-template-areas:"n n" "q u" "d d"}
+  .ing .n{grid-area:n}.ing .q{grid-area:q}.ing .u{grid-area:u}.ing .d{grid-area:d;justify-self:end}
+}
+
+/* ---------- modal ---------- */
+.veil{
+  position:fixed;inset:0;background:rgba(19,34,29,.55);z-index:40;
+  display:flex;align-items:flex-end;justify-content:center;padding:0;
+}
+@media (min-width:620px){.veil{align-items:center;padding:24px}}
+.sheet{
+  background:var(--paper);width:100%;max-width:640px;max-height:92vh;overflow:auto;
+  border-radius:14px 14px 0 0;padding:18px var(--pad) calc(24px + env(safe-area-inset-bottom));
+}
+@media (min-width:620px){.sheet{border-radius:14px}}
+.sheet header{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.sheet header h3{margin:0;font-family:var(--sign);font-weight:700;letter-spacing:.07em;text-transform:uppercase;font-size:19px}
+.sheet header .x{margin-left:auto;background:none;border:0;font-size:24px;line-height:1;cursor:pointer;color:var(--muted)}
+
+/* ---------- gate ---------- */
+.gate{max-width:400px;margin:8vh auto;padding:0 var(--pad)}
+.gate .mark{font-family:var(--sign);font-weight:700;font-size:44px;text-transform:uppercase;letter-spacing:.01em;line-height:.95;margin-bottom:6px}
+.gate .mark em{font-style:normal;color:var(--brand)}
+.gate .tag{color:var(--muted);margin-bottom:24px}
+.gate .card{padding:20px}
+.or{display:flex;align-items:center;gap:12px;margin:18px 0;color:var(--muted);font-size:13px}
+.or::before,.or::after{content:"";flex:1;border-top:1px solid var(--line)}
+.gbtn{
+  width:100%;display:flex;align-items:center;justify-content:center;gap:10px;
+  background:var(--card);border:1.5px solid var(--line);border-radius:8px;
+  padding:11px;cursor:pointer;font-weight:600;
+}
+.gbtn:hover{border-color:var(--brand)}
+
+.empty{text-align:center;color:var(--muted);padding:30px 12px}
+.empty p{margin:0 0 14px}
+.spin{text-align:center;color:var(--muted);padding:40px 0;font-family:var(--num);font-size:13px}
+</style>
+</head>
+<body>
+<div id="root"><div class="spin">Loading…</div></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
