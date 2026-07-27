@@ -428,13 +428,10 @@ function spanLabel(start) {
    ============================================================ */
 
 function buildList(needs, saved, pantry) {
-  const skip = new Set(pantry);
   const byIngredient = new Map();
   const unconverted = new Map();
 
   for (const n of needs) {
-    if (skip.has(n.ingredient_id)) continue;
-
     if (n.canonical_qty === null || n.canonical_qty === undefined) {
       const key = `${n.ingredient_id}|${n.scaled_unit}`;
       if (!unconverted.has(key)) {
@@ -473,6 +470,7 @@ function buildList(needs, saved, pantry) {
     ...r,
     sources: [...r.sources],
     checked: !!checked.get(r.ingredient_id),
+    have: pantry?.get(r.ingredient_id) || null,
   }));
 
   const added = manual.map((m) => ({
@@ -486,6 +484,7 @@ function buildList(needs, saved, pantry) {
     sources: [],
     checked: m.checked,
     manual: true,
+    have: null,
   }));
 
   const all = [...generated, ...added];
@@ -494,8 +493,15 @@ function buildList(needs, saved, pantry) {
     if (!aisles.has(row.aisle)) aisles.set(row.aisle, []);
     aisles.get(row.aisle).push(row);
   }
+  // Things already in the pantry sink to the bottom of their aisle — still
+  // visible, just out of the way of what actually needs picking up.
   for (const rows of aisles.values()) {
-    rows.sort((a, b) => a.name.localeCompare(b.name));
+    rows.sort((a, b) => {
+      const ah = a.have?.status === "plenty" ? 1 : 0;
+      const bh = b.have?.status === "plenty" ? 1 : 0;
+      if (ah !== bh) return ah - bh;
+      return a.name.localeCompare(b.name);
+    });
   }
   return aisles;
 }
@@ -672,7 +678,8 @@ async function resolveIngredient(name, unit, catalog) {
    Reading a recipe while you cook it
    ============================================================ */
 
-function RecipeViewer({ recipe, own, meal, household, catalog, onClose, onEdit, onChanged }) {
+function RecipeViewer({ recipe, own, meal, household, catalog, pantry,
+                       onClose, onEdit, onChanged }) {
   const [servings, setServings] = useState(meal?.servings || recipe.servings);
   const [stepsDone, setStepsDone] = useState(() => new Set());
   const [added, setAdded] = useState(() => new Set());
@@ -878,6 +885,45 @@ function RecipeViewer({ recipe, own, meal, household, catalog, onClose, onEdit, 
 
   const tweakCount = [...tweaks.values()].filter((t) => t.removed || t.quantity != null).length;
 
+  /**
+   * Knock everything this recipe uses down one level. One button beats
+   * per-ingredient bookkeeping, which nobody does twice.
+   */
+  const [cooked, setCooked] = useState(false);
+  const markCooked = async () => {
+    setSaving("cooked");
+    try {
+      const rows = [];
+      for (const l of effective) {
+        if (!l.ingredient_id) continue;
+        const current = pantry?.get(l.ingredient_id);
+        if (!current) continue;
+        const next = current.status === "plenty" ? "low"
+          : current.status === "low" ? "out" : "out";
+        rows.push({
+          household_id: household.id,
+          ingredient_id: l.ingredient_id,
+          status: next,
+          quantity: current.quantity,
+          unit: current.unit,
+          updated_at: new Date().toISOString(),
+        });
+      }
+      if (rows.length) {
+        await sb.from("pantry_items")
+          .upsert(rows, { onConflict: "household_id,ingredient_id" });
+      }
+      setCooked(true);
+      onChanged?.();
+    } catch (e) {
+      setErr(e.message || "Could not update the pantry.");
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const inPantry = effective.filter((l) => pantry?.has(l.ingredient_id)).length;
+
   return html`
     <${Sheet} title=${recipe.title} onClose=${onClose} wide=${true}>
       <div class="cookhead">
@@ -964,6 +1010,7 @@ function RecipeViewer({ recipe, own, meal, household, catalog, onClose, onEdit, 
             ${effective.map((l) => {
               const a = showAmount(Number(l.quantity) * (l.fixed ? 1 : scale), l.unit);
               const got = added.has(l.id);
+              const stock = pantry?.get(l.ingredient_id)?.status;
               return html`
                 <label class=${"cookline" + (got ? " done" : "")} key=${l.id}>
                   <input type="checkbox" class="tick" checked=${got}
@@ -973,12 +1020,30 @@ function RecipeViewer({ recipe, own, meal, household, catalog, onClose, onEdit, 
                   </span>
                   <span class="ingname">
                     ${l.ingredients?.name || "—"}
+                    ${stock === "low" && html`<em class="prep low">running low</em>`}
+                    ${stock === "out" && html`<em class="prep out">out</em>`}
+                    ${!stock && html`<em class="prep out">not in the pantry</em>`}
                     ${l.fixed && html`<em class="prep">set for this meal</em>`}
                     ${l.note && html`<em class="prep">${l.note}</em>`}
                   </span>
                 </label>`;
             })}
             ${!effective.length && html`<p class="muted small">No ingredients listed.</p>`}
+            ${inPantry > 0 && html`
+              <div class="row" style="margin-top:14px">
+                ${cooked
+                  ? html`<span class="pill pub">Pantry updated</span>`
+                  : html`
+                    <button class="btn ghost sm" disabled=${!!saving}
+                      onClick=${markCooked}>
+                      ${saving === "cooked" ? "Updating…" : "We made this"}
+                    </button>`}
+                <span class="small muted">
+                  ${cooked
+                    ? "Everything used here dropped a level."
+                    : `Knocks ${inPantry} pantry ${inPantry === 1 ? "item" : "items"} down a level.`}
+                </span>
+              </div>`}
           </div>
         </div>
 
@@ -1436,6 +1501,225 @@ function RecipePicker({ recipes, recency, value, onPick }) {
 }
 
 /* ============================================================
+   Pantry
+   ============================================================ */
+
+const STATUS = [
+  { key: "plenty", label: "plenty" },
+  { key: "low", label: "low" },
+  { key: "out", label: "out" },
+];
+
+/** Anything not marked "out" counts as something you can cook with. */
+function haveIt(item) {
+  return !!item && item.status !== "out";
+}
+
+function coverage(recipe, pantry) {
+  const lines = recipe.recipe_ingredients || [];
+  const missing = [];
+  const low = [];
+  for (const l of lines) {
+    const item = pantry.get(l.ingredient_id);
+    if (!haveIt(item)) missing.push(l.ingredients?.name || "something");
+    else if (item.status === "low") low.push(l.ingredients?.name || "something");
+  }
+  return { total: lines.length, missing, low, has: lines.length - missing.length };
+}
+
+function PantryTab({ household, pantry, catalog, aisles, recipes, recency, reload, onPlan }) {
+  const [view, setView] = useState("have");
+  const [adding, setAdding] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [search, setSearch] = useState("");
+
+  const items = useMemo(() => {
+    const list = [...pantry.values()].map((p) => ({
+      ...p,
+      ing: catalog.find((c) => c.id === p.ingredient_id),
+    })).filter((p) => p.ing);
+    const q = search.trim().toLowerCase();
+    return q ? list.filter((p) => p.ing.name.toLowerCase().includes(q)) : list;
+  }, [pantry, catalog, search]);
+
+  const grouped = useMemo(() => {
+    const m = new Map();
+    for (const it of items) {
+      const aisle = it.ing.aisle || "Other";
+      if (!m.has(aisle)) m.set(aisle, []);
+      m.get(aisle).push(it);
+    }
+    for (const rows of m.values()) rows.sort((a, b) => a.ing.name.localeCompare(b.ing.name));
+    const rank = new Map(aisles.map((a) => [a.name, a.sort_order]));
+    return [...m.entries()].sort((a, b) =>
+      (rank.get(a[0]) ?? 500) - (rank.get(b[0]) ?? 500));
+  }, [items, aisles]);
+
+  const add = async () => {
+    const text = adding.trim();
+    if (!text) return;
+    setBusy(true); setErr("");
+    try {
+      const parsed = parseLine(text, catalog);
+      if (!parsed?.name) throw new Error("Couldn't read that.");
+      const id = await resolveIngredient(parsed.name, parsed.unit, catalog);
+      const { error } = await sb.from("pantry_items").upsert({
+        household_id: household.id,
+        ingredient_id: id,
+        status: "plenty",
+        quantity: parsed.guessedQty ? null : parsed.qty,
+        unit: parsed.guessedQty ? null : parsed.unit,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "household_id,ingredient_id" });
+      if (error) throw error;
+      setAdding("");
+      reload();
+    } catch (e) {
+      setErr(e.message || "Couldn't add that.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setStatus = async (item, status) => {
+    await sb.from("pantry_items")
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq("id", item.id);
+    reload();
+  };
+
+  const setAmount = async (item, text) => {
+    const qty = toNumber(text);
+    await sb.from("pantry_items")
+      .update({ quantity: qty, updated_at: new Date().toISOString() })
+      .eq("id", item.id);
+    reload();
+  };
+
+  const setUnit = async (item, unit) => {
+    await sb.from("pantry_items")
+      .update({ unit, updated_at: new Date().toISOString() })
+      .eq("id", item.id);
+    reload();
+  };
+
+  const drop = async (item) => {
+    await sb.from("pantry_items").delete().eq("id", item.id);
+    reload();
+  };
+
+  const cookable = useMemo(() => {
+    return recipes
+      .map((r) => ({ recipe: r, ...coverage(r, pantry) }))
+      .filter((c) => c.total > 0)
+      .sort((a, b) => {
+        if (a.missing.length !== b.missing.length) return a.missing.length - b.missing.length;
+        const ra = recency?.get(a.recipe.id) ?? 9999;
+        const rb = recency?.get(b.recipe.id) ?? 9999;
+        return ra - rb;
+      });
+  }, [recipes, pantry, recency]);
+
+  const ready = cookable.filter((c) => c.missing.length === 0);
+
+  return html`
+    <div>
+      <div class="row wrap" style="margin-bottom:14px">
+        <button class=${"btn sm " + (view === "have" ? "" : "ghost")}
+          onClick=${() => setView("have")}>What we have (${pantry.size})</button>
+        <button class=${"btn sm " + (view === "make" ? "" : "ghost")}
+          onClick=${() => setView("make")}>
+          What we can make${ready.length ? ` (${ready.length})` : ""}
+        </button>
+      </div>
+
+      ${view === "have" ? html`
+        <div class="row" style="margin-bottom:8px">
+          <input type="text" value=${adding}
+            placeholder="Add what you've got — “2 lb flour” or just “paprika”"
+            onInput=${(e) => setAdding(e.target.value)}
+            onKeyDown=${(e) => e.key === "Enter" && add()} />
+          <button class="btn sm" disabled=${busy} onClick=${add}>Add</button>
+        </div>
+        <${Problem} text=${err} />
+
+        ${pantry.size > 8 && html`
+          <input class="picksearch" type="text" value=${search}
+            placeholder="Find something in the pantry"
+            onInput=${(e) => setSearch(e.target.value)}
+            style="margin:10px 0 4px" />`}
+
+        ${!pantry.size
+          ? html`<div class="empty">
+              <p>Nothing in the pantry yet. Add a few staples above, or just
+                shop — anything you tick off the grocery list lands here
+                automatically.</p>
+            </div>`
+          : grouped.map(([aisle, rows]) => html`
+            <div key=${aisle}>
+              <div class="aisle">
+                <span class="name">${aisle}</span>
+                <span class="count num">${rows.length}</span>
+              </div>
+              ${rows.map((it) => html`
+                <div class=${"panrow status-" + it.status} key=${it.id}>
+                  <span class="panname">${it.ing.name}</span>
+                  <span class="statusgroup">
+                    ${STATUS.map((s) => html`
+                      <button class=${"statusbtn" + (it.status === s.key ? " on" : "")}
+                        onClick=${() => setStatus(it, s.key)}>${s.label}</button>`)}
+                  </span>
+                  <input class="panqty" type="text" value=${it.quantity ?? ""}
+                    placeholder="amount"
+                    onBlur=${(e) => setAmount(it, e.target.value)}
+                    onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                  <select class="panunit" value=${it.unit || ""}
+                    onChange=${(e) => setUnit(it, e.target.value || null)}>
+                    <option value="">—</option>
+                    ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                  </select>
+                  <button class="btn quiet" title="Remove"
+                    onClick=${() => drop(it)}>×</button>
+                </div>`)}
+            </div>`)}
+      ` : html`
+        ${!pantry.size
+          ? html`<div class="empty">
+              <p>Add things to the pantry first and this fills itself in.</p>
+            </div>`
+          : html`
+            <p class="small muted" style="margin:0 0 14px">
+              Ranked by how little you're missing. Amounts aren't checked —
+              this tells you whether you have the ingredient, not whether
+              you have enough of it.
+            </p>
+            ${cookable.map((c) => html`
+              <div class=${"cook-card" + (c.missing.length ? "" : " ready")}
+                key=${c.recipe.id}>
+                <div class="row wrap" style="gap:10px">
+                  <strong style="font-size:16.5px">${c.recipe.title}</strong>
+                  <span class="spacer"></span>
+                  <span class=${"cov num" + (c.missing.length ? "" : " full")}>
+                    ${c.has} of ${c.total}
+                  </span>
+                  <button class="btn sm" onClick=${() => onPlan(c.recipe)}>Plan it</button>
+                </div>
+                ${c.missing.length > 0 && html`
+                  <p class="small muted" style="margin:8px 0 0">
+                    Missing: ${c.missing.join(", ")}
+                  </p>`}
+                ${c.low.length > 0 && html`
+                  <p class="small" style="margin:6px 0 0;color:#7A5B12">
+                    Running low: ${c.low.join(", ")}
+                  </p>`}
+              </div>`)}
+          `}
+      `}
+    </div>`;
+}
+
+/* ============================================================
    Add a meal to the calendar
    ============================================================ */
 
@@ -1525,9 +1809,16 @@ function MealPicker({ household, recipes, recency, date, preselect, onClose, onS
    Plan tab
    ============================================================ */
 
-function PlanTab({ household, recipes, recency, meals, week, setWeek, reload, onOpen }) {
+function PlanTab({ household, recipes, recency, meals, week, setWeek, reload,
+                  onOpen, planThis, onPlanned }) {
   const [picker, setPicker] = useState(null);
   const today = iso(new Date());
+
+  useEffect(() => {
+    if (!planThis) return;
+    setPicker({ date: today, recipeId: planThis.id });
+    onPlanned?.();
+  }, [planThis]);
 
   const byDay = useMemo(() => {
     const m = new Map();
@@ -1750,7 +2041,9 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
   }, [grouped, aisles]);
 
   const total = [...grouped.values()].flat();
-  const left = total.filter((r) => !r.checked).length;
+  const stocked = total.filter((r) => r.have?.status === "plenty");
+  const needed = total.filter((r) => r.have?.status !== "plenty");
+  const left = needed.filter((r) => !r.checked).length;
 
   const tick = async (row, checked) => {
     if (row.manual) {
@@ -1762,6 +2055,17 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
         ingredient_id: row.ingredient_id,
         checked,
       }, { onConflict: "household_id,week_start,ingredient_id" });
+
+      // Bought it, so you have it. This is what keeps the pantry current
+      // without anyone maintaining it deliberately.
+      if (checked && row.ingredient_id) {
+        await sb.from("pantry_items").upsert({
+          household_id: household.id,
+          ingredient_id: row.ingredient_id,
+          status: "plenty",
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "household_id,ingredient_id" });
+      }
     }
     reload();
   };
@@ -1786,18 +2090,6 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
 
   const setAisle = async (row, aisle) => {
     await sb.from("ingredients").update({ aisle }).eq("id", row.ingredient_id);
-    reload();
-  };
-
-  const setStaple = async (row, always) => {
-    if (always) {
-      await sb.from("pantry_staples").insert({
-        household_id: household.id, ingredient_id: row.ingredient_id,
-      });
-    } else {
-      await sb.from("pantry_staples").delete()
-        .eq("household_id", household.id).eq("ingredient_id", row.ingredient_id);
-    }
     reload();
   };
 
@@ -1828,7 +2120,9 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
           </div>`
         : html`
           <div class="row small" style="margin-bottom:4px">
-            <span class="tally">${left} of ${total.length} left</span>
+            <span class="tally">${left} of ${needed.length} left</span>
+            ${stocked.length > 0 && html`
+              <span class="tally have">${stocked.length} in the pantry</span>`}
             <span class="spacer"></span>
             <button class="btn quiet" onClick=${() => setTidy(!tidy)}>
               ${tidy ? "Done tidying" : "Fix aisles"}
@@ -1848,12 +2142,16 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
                   : row.literal
                     ? { n: trim(row.qty), u: row.unit }
                     : showQty(row.qty, row.unit, system);
+                const stock = row.have?.status;
                 return html`
-                <div class=${"line" + (row.checked ? " done" : "")} key=${row.key}>
+                <div class=${"line" + (row.checked ? " done" : "")
+                    + (stock === "plenty" ? " stocked" : "")} key=${row.key}>
                   <input class="tick" type="checkbox" checked=${row.checked}
                     aria-label=${row.name}
                     onChange=${(e) => tick(row, e.target.checked)} />
                   <span class="what">${row.name}</span>
+                  ${stock === "plenty" && html`<span class="stocktag">have it</span>`}
+                  ${stock === "low" && html`<span class="stocktag low">running low</span>`}
                   <span class="leader"></span>
                   ${tidy && row.ingredient_id
                     ? html`
@@ -1861,12 +2159,7 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
                         value=${row.aisle}
                         onChange=${(e) => setAisle(row, e.target.value)}>
                         ${aisles.map((a) => html`<option value=${a.name}>${a.name}</option>`)}
-                      </select>
-                      <label class="small muted row" style="gap:4px">
-                        <input type="checkbox"
-                          onChange=${(e) => setStaple(row, e.target.checked)} />
-                        always have
-                      </label>`
+                      </select>`
                     : html`
                       <span class="qty">
                         <b>${qtyNodes(q.n)}</b>${q.u && html`<i>${q.u}</i>`}
@@ -1902,6 +2195,7 @@ function App() {
   const [week, setWeek] = useState(() => weekStart(new Date()));
   const [viewing, setViewing] = useState(null);
   const [editingFromView, setEditingFromView] = useState(null);
+  const [planThis, setPlanThis] = useState(null);
 
   const [recipes, setRecipes] = useState([]);
   const [library, setLibrary] = useState([]);
@@ -1910,7 +2204,7 @@ function App() {
   const [meals, setMeals] = useState([]);
   const [needs, setNeeds] = useState([]);
   const [saved, setSaved] = useState([]);
-  const [pantry, setPantry] = useState([]);
+  const [pantry, setPantry] = useState(() => new Map());
   const [recency, setRecency] = useState(() => new Map());
   const [fault, setFault] = useState("");
 
@@ -1957,7 +2251,7 @@ function App() {
         .eq("household_id", household.id).gte("scheduled_on", from).lte("scheduled_on", to),
       sb.from("list_items").select("*")
         .eq("household_id", household.id).eq("week_start", from),
-      sb.from("pantry_staples").select("ingredient_id")
+      sb.from("pantry_items").select("*")
         .eq("household_id", household.id),
       sb.from("meal_plan").select("recipe_id, scheduled_on")
         .eq("household_id", household.id)
@@ -1974,7 +2268,7 @@ function App() {
     setMeals(m.data || []);
     setNeeds(n.data || []);
     setSaved(s.data || []);
-    setPantry((p.data || []).map((x) => x.ingredient_id));
+    setPantry(new Map((p.data || []).map((x) => [x.ingredient_id, x])));
 
     // Rank by how recently each recipe was last on the calendar, so the
     // picker opens on what this household actually cooks.
@@ -1999,6 +2293,9 @@ function App() {
           filter: `household_id=eq.${household.id}` }, load)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "meal_tweaks" }, load)
+      .on("postgres_changes",
+        { event: "*", schema: "public", table: "pantry_items",
+          filter: `household_id=eq.${household.id}` }, load)
       .subscribe();
     return () => { sb.removeChannel(ch); };
   }, [household, load]);
@@ -2010,7 +2307,8 @@ function App() {
 
   const unchecked = (() => {
     const g = buildList(needs, saved, pantry);
-    return [...g.values()].flat().filter((r) => !r.checked).length;
+    return [...g.values()].flat()
+      .filter((r) => !r.checked && r.have?.status !== "plenty").length;
   })();
 
   return html`
@@ -2023,9 +2321,10 @@ function App() {
         </span>
       </div>
 
-      <nav class="tabs">
+      <nav class="tabs four">
         <button aria-current=${String(tab === "plan")} onClick=${() => setTab("plan")}>Plan</button>
         <button aria-current=${String(tab === "recipes")} onClick=${() => setTab("recipes")}>Recipes</button>
+        <button aria-current=${String(tab === "pantry")} onClick=${() => setTab("pantry")}>Pantry</button>
         <button aria-current=${String(tab === "list")} onClick=${() => setTab("list")}>
           List${unchecked ? html`<span class="badge">${unchecked}</span>` : null}
         </button>
@@ -2037,12 +2336,18 @@ function App() {
         ${tab === "plan" && html`<${PlanTab} household=${household}
           recipes=${recipes} recency=${recency} meals=${meals}
           week=${week} setWeek=${setWeek} reload=${load}
+          planThis=${planThis} onPlanned=${() => setPlanThis(null)}
           onOpen=${(r, m, adjust) => r
             && setViewing({ recipe: r, own: true, meal: m, adjust })} />`}
 
         ${tab === "recipes" && html`<${RecipesTab} household=${household}
           mine=${recipes} library=${library} catalog=${catalog} reload=${load}
           onOpen=${(r, own) => setViewing({ recipe: r, own })} />`}
+
+        ${tab === "pantry" && html`<${PantryTab} household=${household}
+          pantry=${pantry} catalog=${catalog} aisles=${aisles}
+          recipes=${recipes} recency=${recency} reload=${load}
+          onPlan=${(r) => { setTab("plan"); setPlanThis(r); }} />`}
 
         ${tab === "list" && html`<${ListTab} household=${household}
           week=${week} setWeek=${setWeek} needs=${needs} saved=${saved}
@@ -2062,7 +2367,7 @@ function App() {
 
       ${viewing && html`<${RecipeViewer} recipe=${viewing.recipe}
         own=${viewing.own} meal=${viewing.meal}
-        household=${household} catalog=${catalog}
+        household=${household} catalog=${catalog} pantry=${pantry}
         onClose=${() => setViewing(null)}
         onChanged=${load}
         onEdit=${() => { setEditingFromView(viewing.recipe); setViewing(null); }} />`}
