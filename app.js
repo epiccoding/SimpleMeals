@@ -3147,6 +3147,21 @@ function App() {
   const [session, setSession] = useState(undefined);
   const [household, setHousehold] = useState(undefined);
   const [tab, setTab] = useState("plan");
+
+  // Analytics: this app is one HTML page with tabs rather than real
+  // per-page URLs, so a normal analytics pageview only ever sees one
+  // "page." This turns each tab into its own virtual page instead, so
+  // GA4 (and anything else listening for gtag calls) can report which
+  // tab people actually spend time in. No-ops harmlessly if the GA4
+  // snippet in index.html hasn't been given a real Measurement ID yet.
+  useEffect(() => {
+    if (typeof window.gtag !== "function") return;
+    window.gtag("event", "page_view", {
+      page_title: tab,
+      page_location: `${window.location.origin}${window.location.pathname}#${tab}`,
+      page_path: `/${tab}`,
+    });
+  }, [tab]);
   const [week, setWeek] = useState(() => weekStart(new Date()));
   const [viewing, setViewing] = useState(null);
   const [editingFromView, setEditingFromView] = useState(null);

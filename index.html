@@ -8,6 +8,24 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<!--
+  Google Analytics 4. Replace G-XXXXXXXXXX below with the Measurement ID
+  from analytics.google.com → Admin → Data Streams.
+
+  send_page_view is turned off here on purpose. This app is one HTML
+  page with tabs, not real per-page URLs, so the automatic pageview GA4
+  would normally fire on load doesn't mean much. app.js fires its own
+  page_view event whenever the visible tab changes instead, so GA4 can
+  report Plan/Recipes/Pantry/List as separate pages with real time-on-page.
+-->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){ dataLayer.push(arguments); }
+  gtag("js", new Date());
+  gtag("config", "G-2TL4YDBZ3D", { send_page_view: false });
+</script>
 <style>
 :root{
   --paper:#F4F5F3;
