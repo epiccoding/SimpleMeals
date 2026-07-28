@@ -4,7 +4,7 @@ import {
   useState, useEffect, useMemo, useCallback, useRef,
 } from "https://esm.sh/preact@10.23.2/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, GA_MEASUREMENT_ID } from "./config.js";
 
 const html = htm.bind(h);
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -632,6 +632,140 @@ function Problem({ text }) {
 }
 
 /* ============================================================
+   Analytics, gated on consent
+
+   Google Analytics doesn't load at all until someone accepts the
+   cookie notice — not "loads quietly and the banner is just for show."
+   Loading it unconditionally in index.html and merely hiding a banner
+   over it would set the tracking cookie before consent exists, which
+   is the exact thing consent-first rules are meant to prevent.
+   ============================================================ */
+
+let gaLoaded = false;
+
+function loadGA() {
+  if (gaLoaded || !GA_MEASUREMENT_ID) return;
+  gaLoaded = true;
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = function () { window.dataLayer.push(arguments); };
+  window.gtag("js", new Date());
+  window.gtag("config", GA_MEASUREMENT_ID, { send_page_view: false });
+  const s = document.createElement("script");
+  s.async = true;
+  s.src = `https://www.googletagmanager.com/gtag/js?id=${GA_MEASUREMENT_ID}`;
+  document.head.appendChild(s);
+}
+
+/**
+ * One HTML page with tabs, not real per-page URLs, so a normal pageview
+ * only ever sees one "page." This fakes a real, path-shaped URL per tab
+ * — not a #hash, which GA4 doesn't reliably bucket the same way for
+ * hand-fired events — so the standard Pages and screens report can tell
+ * Plan/Recipes/Pantry/List apart with no extra configuration.
+ */
+function sendPageview(tab) {
+  if (typeof window.gtag !== "function") return;
+  const dir = window.location.pathname.replace(/[^/]*$/, "");
+  window.gtag("event", "page_view", {
+    page_title: tab,
+    page_location: `${window.location.origin}${dir}${tab}`,
+  });
+}
+
+function ConsentBanner({ onAccept, onDecline }) {
+  return html`
+    <div class="consent">
+      <p>
+        This app uses Google Analytics to see which pages get used, so
+        it's clear what's worth improving. It only runs if you say yes,
+        and “Cookies” up top lets you change your mind anytime.
+        <a href="./privacy.html" target="_blank" rel="noopener">What this means</a>
+      </p>
+      <div class="row" style="flex:none;gap:8px">
+        <button class="btn ghost sm" onClick=${onDecline}>No thanks</button>
+        <button class="btn sm" onClick=${onAccept}>Sounds good</button>
+      </div>
+    </div>`;
+}
+
+/* ============================================================
+   Household theming
+
+   Recolors --brand and --brand-deep only. Status colors (pantry
+   plenty/low/out) live on their own fixed --status-* tokens in the
+   stylesheet specifically so this can never touch them — a household
+   can make the whole app purple without "plenty" turning purple too.
+   ============================================================ */
+
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  const n = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const i = parseInt(n, 16);
+  return { r: (i >> 16) & 255, g: (i >> 8) & 255, b: i & 255 };
+}
+function rgbToHex(r, g, b) {
+  const c = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return { h: h * 360, s: s * 100, l: l * 100 };
+}
+function hslToRgb(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  if (s === 0) return { r: l * 255, g: l * 255, b: l * 255 };
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: hue2rgb(p, q, h + 1 / 3) * 255,
+    g: hue2rgb(p, q, h) * 255,
+    b: hue2rgb(p, q, h - 1 / 3) * 255,
+  };
+}
+function darkenHex(hex, byPercentLightness) {
+  try {
+    const { r, g, b } = hexToRgb(hex);
+    const { h, s, l } = rgbToHsl(r, g, b);
+    const l2 = Math.max(6, l - byPercentLightness);
+    const rgb2 = hslToRgb(h, s, l2);
+    return rgbToHex(rgb2.r, rgb2.g, rgb2.b);
+  } catch {
+    return hex;
+  }
+}
+
+/** Apply (or clear, if hex is falsy) a household's theme color live. */
+function applyTheme(hex) {
+  const root = document.documentElement.style;
+  if (!hex || !/^#[0-9a-fA-F]{3,6}$/.test(hex)) {
+    root.removeProperty("--brand");
+    root.removeProperty("--brand-deep");
+    return;
+  }
+  root.setProperty("--brand", hex);
+  root.setProperty("--brand-deep", darkenHex(hex, 15));
+}
+
+/* ============================================================
    Sign in
    ============================================================ */
 
@@ -751,6 +885,106 @@ function logActivity(household, summary, recipeId = null) {
   sb.from("activity_log")
     .insert({ household_id: household.id, summary, recipe_id: recipeId })
     .then(({ error }) => { if (error) console.warn("activity log:", error.message); });
+}
+
+/* ============================================================
+   Household settings
+   ============================================================ */
+
+function SettingsPanel({ household, isOwner, consent, onConsent, onClose, onSaved }) {
+  const [name, setName] = useState(household.name);
+  const [color, setColor] = useState(household.theme_color || "#1F6E4E");
+  const [saving, setSaving] = useState("");
+  const [err, setErr] = useState("");
+
+  const saveName = async () => {
+    const clean = name.trim();
+    if (!clean || clean === household.name) return;
+    setSaving("name"); setErr("");
+    const { error } = await sb.from("households")
+      .update({ name: clean }).eq("id", household.id);
+    setSaving("");
+    if (error) { setErr(error.message); return; }
+    onSaved();
+  };
+
+  const saveColor = async () => {
+    setSaving("color"); setErr("");
+    applyTheme(color); // instant preview, ahead of the write finishing
+    const { error } = await sb.from("households")
+      .update({ theme_color: color }).eq("id", household.id);
+    setSaving("");
+    if (error) { setErr(error.message); return; }
+    onSaved();
+  };
+
+  const resetColor = async () => {
+    setSaving("color"); setErr("");
+    applyTheme(null);
+    setColor("#1F6E4E");
+    const { error } = await sb.from("households")
+      .update({ theme_color: null }).eq("id", household.id);
+    setSaving("");
+    if (error) { setErr(error.message); return; }
+    onSaved();
+  };
+
+  return html`
+    <${Sheet} title="Household settings" onClose=${onClose}>
+      <label class="field">
+        <span>Household name</span>
+        <div class="row">
+          <input type="text" value=${name} disabled=${!isOwner}
+            onInput=${(e) => setName(e.target.value)}
+            onKeyDown=${(e) => e.key === "Enter" && saveName()} />
+          ${isOwner && html`
+            <button class="btn sm" disabled=${!!saving} onClick=${saveName}>
+              ${saving === "name" ? "Saving…" : "Save"}
+            </button>`}
+        </div>
+      </label>
+
+      <hr class="settingsdivider" />
+
+      <p class="sign muted" style="font-size:13px;margin:0 0 4px">
+        Primary color
+      </p>
+      <p class="small muted" style="margin:0 0 4px">
+        Recolors buttons, headers, and highlights everywhere in the app.
+        Pantry status (plenty / low / out) always stays green, amber, and
+        red regardless, so that stays readable no matter what you pick.
+      </p>
+      ${isOwner
+        ? html`
+          <div class="colorrow">
+            <input type="color" value=${color}
+              onInput=${(e) => { setColor(e.target.value); applyTheme(e.target.value); }} />
+            <button class="btn sm" disabled=${!!saving} onClick=${saveColor}>
+              ${saving === "color" ? "Saving…" : "Save color"}
+            </button>
+            <button class="btn quiet" onClick=${resetColor}>Reset to default</button>
+          </div>`
+        : html`<p class="small muted">Only ${household.name}'s owner can change this.</p>`}
+
+      <hr class="settingsdivider" />
+
+      <p class="sign muted" style="font-size:13px;margin:0 0 6px">Analytics</p>
+      <p class="small muted" style="margin:0 0 8px">
+        Currently
+        <strong>${consent === "granted" ? "on" : "off"}</strong> —
+        Google Analytics helps see which pages get used. It's optional and
+        has nothing to do with the app working.
+        <a href="./privacy.html" target="_blank" rel="noopener">What this means</a>
+      </p>
+      <div class="row" style="gap:8px">
+        <button class=${"btn sm " + (consent === "granted" ? "" : "ghost")}
+          onClick=${() => onConsent("granted")}>Turn on</button>
+        <button class=${"btn sm " + (consent !== "granted" ? "" : "ghost")}
+          onClick=${() => onConsent("denied")}>Turn off</button>
+      </div>
+
+      <${Problem} text=${err} />
+    <//>`;
 }
 
 /* ============================================================
@@ -1722,6 +1956,128 @@ function PantryQuickEdit({ item, buckets, onClose, onFix, onStatus, onAmount,
 }
 
 /* ============================================================
+   Pantry check — a fast, one-thing-at-a-time review instead of
+   scanning a wall of chips. Oldest-confirmed item first, so the things
+   nobody's touched in months are exactly what surfaces, and anything
+   reviewed today naturally sinks to the back of next time's queue.
+   ============================================================ */
+
+function relTime(iso) {
+  if (!iso) return "never confirmed";
+  const ms = Date.now() - new Date(iso).getTime();
+  const days = Math.floor(ms / 86400000);
+  if (days < 1) return "confirmed today";
+  if (days === 1) return "confirmed yesterday";
+  if (days < 30) return `confirmed ${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `confirmed ${months} month${months > 1 ? "s" : ""} ago`;
+  return `confirmed ${Math.floor(months / 12)}y+ ago`;
+}
+
+const SWIPE_THRESHOLD = 90;
+
+function SwipeCard({ item, onDecide }) {
+  const [dx, setDx] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const startX = useRef(null);
+
+  const onDown = (e) => {
+    startX.current = e.clientX;
+    setDragging(true);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onMove = (e) => {
+    if (startX.current === null) return;
+    setDx(e.clientX - startX.current);
+  };
+  const settle = () => {
+    if (dx > SWIPE_THRESHOLD) onDecide("plenty");
+    else if (dx < -SWIPE_THRESHOLD) onDecide("out");
+    else { setDx(0); setDragging(false); }
+    startX.current = null;
+  };
+
+  const rot = Math.max(-14, Math.min(14, dx / 12));
+  const likeOpacity = Math.min(1, Math.max(0, dx / SWIPE_THRESHOLD));
+  const nopeOpacity = Math.min(1, Math.max(0, -dx / SWIPE_THRESHOLD));
+
+  return html`
+    <div class="swipecard"
+      style="transform:translateX(${dx}px) rotate(${rot}deg);
+             transition:${dragging ? "none" : "transform .25s ease"}"
+      onPointerDown=${onDown} onPointerMove=${onMove}
+      onPointerUp=${settle} onPointerCancel=${settle}>
+      <span class="swipestamp like" style="opacity:${likeOpacity}">HAVE IT</span>
+      <span class="swipestamp nope" style="opacity:${nopeOpacity}">OUT</span>
+      <span class="swipename">${item.ing.name}</span>
+      <span class="swipemeta">${item.ing.aisle} · ${item.location || "Other"}</span>
+      <span class="swipewhen">${relTime(item.updated_at)}</span>
+    </div>`;
+}
+
+function PantryCheck({ household, pantry, catalog, onClose, onChanged }) {
+  const [queue] = useState(() =>
+    [...pantry.values()]
+      .map((p) => ({ ...p, ing: catalog.find((c) => c.id === p.ingredient_id) }))
+      .filter((p) => p.ing)
+      .sort((a, b) => new Date(a.updated_at || 0) - new Date(b.updated_at || 0)));
+  const [index, setIndex] = useState(0);
+  const [reviewed, setReviewed] = useState(0);
+
+  const current = queue[index];
+  const done = index >= queue.length;
+
+  const decide = async (status) => {
+    if (status) {
+      await sb.from("pantry_items")
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq("id", current.id);
+      setReviewed((n) => n + 1);
+    }
+    setIndex((i) => i + 1);
+    onChanged?.();
+  };
+
+  const finish = () => {
+    if (reviewed > 0) {
+      logActivity(household, `did a pantry check — confirmed ${reviewed} item${reviewed === 1 ? "" : "s"}`);
+    }
+    onClose();
+  };
+
+  return html`
+    <${Sheet} title="Pantry check" onClose=${finish}>
+      ${!queue.length
+        ? html`<p class="small muted">Nothing in the pantry to check yet.</p>`
+        : done
+          ? html`
+            <div class="swipedone">
+              <span class="swipedoneicon">✓</span>
+              <p>All caught up.</p>
+              <p class="small muted">Confirmed ${reviewed} of ${queue.length}.</p>
+              <button class="btn" onClick=${finish}>Done</button>
+            </div>`
+          : html`
+            <p class="small muted swipecount">${index + 1} of ${queue.length}</p>
+            <div class="swipestage">
+              <${SwipeCard} item=${current} key=${current.id} onDecide=${decide} />
+            </div>
+            <div class="swipeactions">
+              <button class="swipebtn out" onClick=${() => decide("out")}>Out</button>
+              <button class="swipebtn low" onClick=${() => decide("low")}>Running low</button>
+              <button class="swipebtn plenty" onClick=${() => decide("plenty")}>Still have it</button>
+            </div>
+            <button class="btn quiet" style="margin-top:4px" onClick=${() => decide(null)}>
+              Skip — not sure
+            </button>
+            <p class="small muted" style="margin-top:10px">
+              Drag the card right if you have it, left if you're out — or
+              use the buttons.
+            </p>`}
+    <//>`;
+}
+
+/* ============================================================
    Pantry
    ============================================================ */
 
@@ -1967,11 +2323,42 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
   const [fixing, setFixing] = useState(null);
+  const [checking, setChecking] = useState(false);
   const [detail, setDetail] = useState(null);
   const [editingBuckets, setEditingBuckets] = useState(false);
   const [newBucket, setNewBucket] = useState("");
   const [dragOver, setDragOver] = useState(null);
   const [dragging, setDragging] = useState(null);
+
+  const [layout, setLayout] = useState(
+    () => localStorage.getItem("sm-pantry-layout") || "chips");
+  const setLayoutSticky = (v) => {
+    setLayout(v);
+    try { localStorage.setItem("sm-pantry-layout", v); } catch { /* private mode */ }
+  };
+
+  const [sortMode, setSortMode] = useState(
+    () => localStorage.getItem("sm-pantry-sort") || "name");
+  const setSortModeSticky = (v) => {
+    setSortMode(v);
+    try { localStorage.setItem("sm-pantry-sort", v); } catch { /* private mode */ }
+  };
+
+  const STATUS_RANK = { out: 0, low: 1, plenty: 2 };
+  const sortRows = (rows) => {
+    const arr = [...rows];
+    if (sortMode === "status") {
+      arr.sort((a, b) =>
+        STATUS_RANK[a.status] - STATUS_RANK[b.status]
+        || a.ing.name.localeCompare(b.ing.name));
+    } else if (sortMode === "stale") {
+      arr.sort((a, b) =>
+        new Date(a.updated_at || 0) - new Date(b.updated_at || 0));
+    } else {
+      arr.sort((a, b) => a.ing.name.localeCompare(b.ing.name));
+    }
+    return arr;
+  };
 
   const items = useMemo(() => {
     const list = [...pantry.values()].map((p) => ({
@@ -1994,9 +2381,9 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
       const loc = m.has(it.location) ? it.location : "Other";
       m.get(loc).push(it);
     }
-    for (const rows of m.values()) rows.sort((a, b) => a.ing.name.localeCompare(b.ing.name));
+    for (const [name, rows] of m) m.set(name, sortRows(rows));
     return m;
-  }, [items, bucketNames]);
+  }, [items, bucketNames, sortMode]);
 
   const addExisting = async (ing) => {
     setBusy(true); setErr("");
@@ -2173,7 +2560,14 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
           onClick=${() => setView("make")}>
           What we can make${ready.length ? ` (${ready.length})` : ""}
         </button>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" disabled=${!pantry.size}
+          onClick=${() => setChecking(true)}>🔄 Pantry check</button>
       </div>
+
+      ${checking && html`<${PantryCheck} household=${household}
+        pantry=${pantry} catalog=${catalog}
+        onClose=${() => setChecking(false)} onChanged=${reload} />`}
 
       ${view === "have" ? html`
         <${IngredientBox} catalog=${catalog} value=${adding} busy=${busy}
@@ -2196,17 +2590,32 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
                 automatically.</p>
             </div>`
           : html`
-            <div class="row wrap" style="margin:2px 0 4px;gap:10px">
-              <p class="small muted" style="margin:0">
-                Tap anything for status and details. Drag a chip onto a
-                bucket to move it — on a phone, use the “where it lives”
-                menu inside the popover instead.
-              </p>
+            <div class="row wrap" style="margin:2px 0 10px;gap:10px">
+              <label class="unitpick">
+                <span class="sr">Sort by</span>
+                <select value=${sortMode}
+                  onChange=${(e) => setSortModeSticky(e.target.value)}>
+                  <option value="name">Sort: name</option>
+                  <option value="status">Sort: needs attention first</option>
+                  <option value="stale">Sort: least recently confirmed</option>
+                </select>
+              </label>
+              <span class="viewswap">
+                <button class=${layout === "chips" ? "on" : ""}
+                  onClick=${() => setLayoutSticky("chips")}>Chips</button>
+                <button class=${layout === "table" ? "on" : ""}
+                  onClick=${() => setLayoutSticky("table")}>Table</button>
+              </span>
               <span class="spacer"></span>
               <button class="btn quiet" onClick=${() => setEditingBuckets(!editingBuckets)}>
                 ${editingBuckets ? "Done arranging buckets" : "Arrange buckets"}
               </button>
             </div>
+            <p class="small muted" style="margin:-4px 0 12px">
+              ${layout === "chips"
+                ? "Tap anything for status and details. Drag a chip onto a bucket to move it — on a phone, use the “where it lives” menu inside the popover instead."
+                : "Click a cell to edit it directly — amount, unit, bucket, and status all update immediately."}
+            </p>
 
             ${editingBuckets && html`
               <div class="bucketedit">
@@ -2243,7 +2652,67 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
                       Nothing here. Drag something in, or move it here from
                       its popover.
                     </p>`
-                  : html`
+                  : layout === "table"
+                    ? html`
+                      <div class="tablewrap">
+                        <table class="pantable">
+                          <thead>
+                            <tr>
+                              <th>Item</th>
+                              <th>Amount</th>
+                              <th>Unit</th>
+                              <th>Bucket</th>
+                              <th>Confirmed</th>
+                              <th colspan="2">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            ${rows.map((it) => html`
+                              <tr class=${"tr-" + it.status} key=${it.id}>
+                                <td>
+                                  <button class="tblname" onClick=${() => setFixing(it)}>
+                                    ${it.ing.name}
+                                  </button>
+                                </td>
+                                <td>
+                                  <input class="tblqty" type="text" value=${it.quantity ?? ""}
+                                    placeholder="—"
+                                    onBlur=${(e) => setAmount(it, e.target.value)}
+                                    onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                                </td>
+                                <td>
+                                  <select class="tblunit" value=${it.unit || ""}
+                                    onChange=${(e) => setUnit(it, e.target.value || null)}>
+                                    <option value="">—</option>
+                                    ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                                  </select>
+                                </td>
+                                <td>
+                                  <select class="tblunit" value=${it.location || "Other"}
+                                    onChange=${(e) => setLocation(it, e.target.value)}>
+                                    ${bucketNames.map((b) => html`<option value=${b}>${b}</option>`)}
+                                  </select>
+                                </td>
+                                <td class="tblwhen small muted">${relTime(it.updated_at)}</td>
+                                <td class="tblstatusbtns">
+                                  ${STATUS.map((s) => html`
+                                    <button
+                                      class=${"tblstatusdot " + s.key
+                                        + (it.status === s.key ? " on" : "")}
+                                      title=${s.label}
+                                      onClick=${() => setStatus(it, s.key)}>
+                                      ${s.label[0].toUpperCase()}
+                                    </button>`)}
+                                </td>
+                                <td>
+                                  <button class="btn quiet" title="Take out of the pantry"
+                                    onClick=${() => drop(it)}>×</button>
+                                </td>
+                              </tr>`)}
+                          </tbody>
+                        </table>
+                      </div>`
+                    : html`
                     <div class="pchips">
                       ${rows.map((it) => html`
                         <button type="button"
@@ -3148,25 +3617,56 @@ function App() {
   const [household, setHousehold] = useState(undefined);
   const [tab, setTab] = useState("plan");
 
-  // Analytics: this app is one HTML page with tabs rather than real
-  // per-page URLs, so a normal analytics pageview only ever sees one
-  // "page." This turns each tab into its own virtual page instead, so
-  // GA4 (and anything else listening for gtag calls) can report which
-  // tab people actually spend time in. No-ops harmlessly if the GA4
-  // snippet in index.html hasn't been given a real Measurement ID yet.
+  const [consent, setConsent] = useState(() => {
+    try { return localStorage.getItem("sm-consent"); } catch { return null; }
+  });
+
   useEffect(() => {
-    if (typeof window.gtag !== "function") return;
-    window.gtag("event", "page_view", {
-      page_title: tab,
-      page_location: `${window.location.origin}${window.location.pathname}#${tab}`,
-      page_path: `/${tab}`,
-    });
-  }, [tab]);
+    if (consent === "granted") loadGA();
+  }, []); // only needs to run once, on first load
+
+  const chooseConsent = (value) => {
+    setConsent(value);
+    try { localStorage.setItem("sm-consent", value); } catch { /* private mode */ }
+    if (value === "granted") loadGA();
+  };
+
+  // Fires for the tab that's visible right now whenever it changes, and
+  // also once the moment consent flips to granted (the dependency on
+  // `consent` covers that) — so accepting mid-session doesn't wait for
+  // the next tab click to register the page someone's already on.
+  useEffect(() => {
+    if (consent === "granted") sendPageview(tab);
+  }, [tab, consent]);
   const [week, setWeek] = useState(() => weekStart(new Date()));
   const [viewing, setViewing] = useState(null);
   const [editingFromView, setEditingFromView] = useState(null);
   const [planThis, setPlanThis] = useState(null);
   const [showActivity, setShowActivity] = useState(false);
+
+  const [dark, setDark] = useState(() => {
+    try {
+      const saved = localStorage.getItem("sm-theme");
+      if (saved) return saved === "dark";
+    } catch { /* private mode */ }
+    // No explicit choice yet: match the device, same as most apps do
+    // on first launch, rather than always defaulting to light.
+    return typeof window !== "undefined"
+      && window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  }, [dark]);
+
+  const toggleDark = () => {
+    setDark((d) => {
+      const next = !d;
+      try { localStorage.setItem("sm-theme", next ? "dark" : "light"); } catch { /* private mode */ }
+      return next;
+    });
+  };
+  const [showSettings, setShowSettings] = useState(false);
 
   const [recipes, setRecipes] = useState([]);
   const [library, setLibrary] = useState([]);
@@ -3192,18 +3692,20 @@ function App() {
   }, []);
 
   /* --- household --- */
-  useEffect(() => {
+  const [isOwner, setIsOwner] = useState(false);
+
+  const loadHousehold = useCallback(async () => {
     if (!session) return;
-    let dead = false;
-    (async () => {
-      const { data, error } = await sb.from("household_members")
-        .select("role, households(*)").eq("user_id", session.user.id);
-      if (dead) return;
-      if (error) { setFault(error.message); return; }
-      setHousehold(data?.[0]?.households || null);
-    })();
-    return () => { dead = true; };
+    const { data, error } = await sb.from("household_members")
+      .select("role, households(*)").eq("user_id", session.user.id);
+    if (error) { setFault(error.message); return; }
+    const h = data?.[0]?.households || null;
+    setHousehold(h);
+    setIsOwner(data?.[0]?.role === "owner");
+    applyTheme(h?.theme_color || null);
   }, [session]);
+
+  useEffect(() => { loadHousehold(); }, [loadHousehold]);
 
   /* --- data --- */
   const load = useCallback(async () => {
@@ -3303,14 +3805,28 @@ function App() {
       <div class="topbar">
         <span class="wordmark">Simple<em>Meals</em></span>
         <span class="who">
-          ${household.name}
+          <button class="hname" onClick=${() => setShowSettings(true)}>
+            ${household.name}
+          </button>
+          <button onClick=${toggleDark} title=${dark ? "Switch to light" : "Switch to dark"}>
+            ${dark ? "☀️ Light" : "🌙 Dark"}
+          </button>
           <button onClick=${() => setShowActivity(true)}>Activity</button>
           <button onClick=${() => sb.auth.signOut()}>Sign out</button>
         </span>
       </div>
 
+      ${consent === null && html`<${ConsentBanner}
+        onAccept=${() => chooseConsent("granted")}
+        onDecline=${() => chooseConsent("denied")} />`}
+
       ${showActivity && html`<${ActivityPanel} household=${household}
         onClose=${() => setShowActivity(false)} />`}
+
+      ${showSettings && html`<${SettingsPanel} household=${household}
+        isOwner=${isOwner} consent=${consent} onConsent=${chooseConsent}
+        onClose=${() => setShowSettings(false)}
+        onSaved=${loadHousehold} />`}
 
       <nav class="tabs four">
         <button aria-current=${String(tab === "plan")} onClick=${() => setTab("plan")}>
