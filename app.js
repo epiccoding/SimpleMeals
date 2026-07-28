@@ -743,6 +743,66 @@ function Onboard({ onReady }) {
 }
 
 /**
+ * Record a plain-English line in the household's activity log. Fire and
+ * forget — a logging failure must never break the action it's attached
+ * to, so errors are swallowed rather than surfaced.
+ */
+function logActivity(household, summary, recipeId = null) {
+  sb.from("activity_log")
+    .insert({ household_id: household.id, summary, recipe_id: recipeId })
+    .then(({ error }) => { if (error) console.warn("activity log:", error.message); });
+}
+
+/* ============================================================
+   Recent activity
+   ============================================================ */
+
+function ActivityPanel({ household, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let dead = false;
+    sb.from("activity_log").select("*")
+      .eq("household_id", household.id)
+      .order("created_at", { ascending: false })
+      .limit(60)
+      .then(({ data, error }) => {
+        if (dead) return;
+        if (error) setErr(error.message);
+        else setRows(data || []);
+      });
+    return () => { dead = true; };
+  }, [household.id]);
+
+  const when = (iso) => {
+    const d = new Date(iso);
+    const sameDay = d.toDateString() === new Date().toDateString();
+    return sameDay
+      ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+      : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+
+  return html`
+    <${Sheet} title="Recent activity" onClose=${onClose}>
+      <${Problem} text=${err} />
+      ${rows === null
+        ? html`<p class="small muted">Loading…</p>`
+        : !rows.length
+          ? html`<p class="small muted">Nothing logged yet.</p>`
+          : html`
+            <div class="activity">
+              ${rows.map((r) => html`
+                <div class="activityrow" key=${r.id}>
+                  <span class="activitywho">${r.actor_name || "Someone"}</span>
+                  <span class="activitywhat">${r.summary}</span>
+                  <span class="activitywhen num">${when(r.created_at)}</span>
+                </div>`)}
+            </div>`}
+    <//>`;
+}
+
+/**
  * Find an ingredient by name, creating it if it's genuinely new. Shared by
  * the recipe editor and the per-meal adjuster.
  */
@@ -912,6 +972,7 @@ function RecipeViewer({ recipe, own, meal, household, catalog, pantry,
         if (error) throw error;
       }
       await loadTweaks();
+      logActivity(household, `adjusted ${recipe.title} for this meal`, recipe.id);
       setAdjusting(false);
       onChanged?.();
     } catch (e) {
@@ -969,6 +1030,7 @@ function RecipeViewer({ recipe, own, meal, household, catalog, pantry,
           .eq("id", meal.id);
       }
       onChanged?.();
+      logActivity(household, `created ${made.title} from ${recipe.title}`, made.id);
       onClose();
     } catch (e) {
       setErr(e.message || "Could not create the recipe.");
@@ -1301,6 +1363,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
       };
 
       let recipeId = recipe?.id;
+      const isNew = !recipeId;
       if (recipeId) {
         const { error } = await sb.from("recipes").update(payload).eq("id", recipeId);
         if (error) throw error;
@@ -1311,6 +1374,7 @@ function RecipeEditor({ household, recipe, catalog, onClose, onSaved }) {
         if (error) throw error;
         recipeId = data.id;
       }
+      logActivity(household, `${isNew ? "added" : "edited"} ${payload.title}`, recipeId);
 
       const lines = [];
       for (let i = 0; i < usable.length; i++) {
@@ -1944,6 +2008,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
         updated_at: new Date().toISOString(),
       }, { onConflict: "household_id,ingredient_id" });
       if (error) throw error;
+      logActivity(household, `added ${ing.name} to the pantry`);
       setAdding("");
       reload();
     } catch (e) {
@@ -1970,6 +2035,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
         updated_at: new Date().toISOString(),
       }, { onConflict: "household_id,ingredient_id" });
       if (error) throw error;
+      logActivity(household, `added ${parsed.name} to the pantry`);
       setAdding("");
       reload();
     } catch (e) {
@@ -1979,6 +2045,9 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
     }
   };
 
+  // Status, amount, and location are the pantry's high-frequency, routine
+  // edits — logging every one would flood the feed with noise nobody
+  // wants to scroll through, so only additions and removals are recorded.
   const setStatus = async (item, status) => {
     await sb.from("pantry_items")
       .update({ status, updated_at: new Date().toISOString() })
@@ -2010,6 +2079,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
 
   const drop = async (item) => {
     await sb.from("pantry_items").delete().eq("id", item.id);
+    logActivity(household, `removed ${item.ing.name} from the pantry`);
     reload();
   };
 
@@ -2027,6 +2097,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
       .insert({ household_id: household.id, name,
         sort_order: locations.length ? Math.max(...locations.map((l) => l.sort_order)) + 10 : 10 });
     if (error && error.code !== "23505") { setErr(error.message); return; }
+    logActivity(household, `created the "${name}" bucket`);
     setNewBucket("");
     reload();
   };
@@ -2038,6 +2109,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
       p_household: household.id, p_old: oldName, p_new: clean,
     });
     if (error) { setErr(error.message); return; }
+    logActivity(household, `renamed the "${oldName}" bucket to "${clean}"`);
     reload();
   };
 
@@ -2047,6 +2119,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
       p_household: household.id, p_name: name,
     });
     if (error) { setErr(error.message); return; }
+    logActivity(household, `removed the "${name}" bucket`);
     reload();
   };
 
@@ -2318,6 +2391,10 @@ function MealPicker({ household, recipes, recency, date, preselect,
       servings: Number(servings) || 4,
     }).select("*, recipes(id, title, servings)").single();
     if (error) { setBusy(false); setErr(error.message); return; }
+    const dayLabel = fromIso(when).toLocaleDateString(
+      undefined, { weekday: "short", month: "short", day: "numeric" });
+    logActivity(household, `planned ${data.recipes?.title || "a meal"} for ${dayLabel}`,
+      recipeId);
     if (requestId) {
       // Fulfilled, so it comes out of the queue. Not fatal if this part
       // fails — the meal itself is already safely saved.
@@ -2436,6 +2513,7 @@ function RequestComposer({ household, recipes, recency, onAdded }) {
     });
     setBusy(false);
     if (error) { setErr(error.message); return; }
+    logActivity(household, `asked for ${text}`, linked?.id || null);
     reset();
     onAdded();
   };
@@ -2601,6 +2679,7 @@ function PlanTab({ household, recipes, recency, meals, week, setWeek, reload,
 
   const dismiss = async (req) => {
     await sb.from("meal_requests").delete().eq("id", req.id);
+    logActivity(household, `dismissed the request for ${req.recipes?.title || req.title}`);
     reloadRequests();
   };
 
@@ -2629,7 +2708,13 @@ function PlanTab({ household, recipes, recency, meals, week, setWeek, reload,
   }, [monthMeals]);
 
   const remove = async (id) => {
+    const m = meals.find((x) => x.id === id) || monthMeals.find((x) => x.id === id);
     await sb.from("meal_plan").delete().eq("id", id);
+    if (m) {
+      const dayLabel = fromIso(m.scheduled_on).toLocaleDateString(
+        undefined, { weekday: "short", month: "short", day: "numeric" });
+      logActivity(household, `removed ${m.recipes?.title || "a meal"} from ${dayLabel}`);
+    }
     reload();
     if (calView === "month") fetchMonth();
   };
@@ -2765,6 +2850,7 @@ function RecipesTab({ household, mine, library, catalog, reload, onOpen }) {
   const remove = async (r) => {
     if (!confirm(`Delete "${r.title}"? Meals already on the calendar will go too.`)) return;
     await sb.from("recipes").delete().eq("id", r.id);
+    logActivity(household, `deleted ${r.title}`);
     reload();
   };
 
@@ -3065,6 +3151,7 @@ function App() {
   const [viewing, setViewing] = useState(null);
   const [editingFromView, setEditingFromView] = useState(null);
   const [planThis, setPlanThis] = useState(null);
+  const [showActivity, setShowActivity] = useState(false);
 
   const [recipes, setRecipes] = useState([]);
   const [library, setLibrary] = useState([]);
@@ -3202,9 +3289,13 @@ function App() {
         <span class="wordmark">Simple<em>Meals</em></span>
         <span class="who">
           ${household.name}
+          <button onClick=${() => setShowActivity(true)}>Activity</button>
           <button onClick=${() => sb.auth.signOut()}>Sign out</button>
         </span>
       </div>
+
+      ${showActivity && html`<${ActivityPanel} household=${household}
+        onClose=${() => setShowActivity(false)} />`}
 
       <nav class="tabs four">
         <button aria-current=${String(tab === "plan")} onClick=${() => setTab("plan")}>
