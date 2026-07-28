@@ -236,12 +236,12 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 }
 .weeknav .btn{flex:none;white-space:nowrap}
 .weeknav .spacer{min-width:8px}
-.weeknav > button{flex:none}
-.weeknav button{
+.weeknav .navarrow{
+  flex:none;
   background:var(--card);border:1.5px solid var(--line);border-radius:8px;
   width:34px;height:34px;cursor:pointer;font-size:16px;line-height:1;
 }
-.weeknav button:hover{border-color:var(--brand)}
+.weeknav .navarrow:hover{border-color:var(--brand)}
 
 .days{display:grid;gap:10px}
 @media (min-width:720px){.days{grid-template-columns:repeat(7,1fr);gap:8px}}
@@ -537,6 +537,100 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
   .adjrow select{grid-area:u}
   .adjrow button{grid-area:d;justify-self:end}
 }
+
+/* ---------- month calendar ---------- */
+.monthwrap{display:grid;grid-template-columns:1fr;gap:20px}
+@media (min-width:860px){
+  .monthwrap{grid-template-columns:1fr 260px;align-items:start}
+}
+
+.monthgrid{background:var(--card);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.monthdow{
+  display:grid;grid-template-columns:repeat(7,1fr);
+  background:var(--brand-deep);color:#F2F7F3;
+}
+.monthdow span{
+  padding:8px 4px;text-align:center;font-family:var(--sign);font-weight:600;
+  text-transform:uppercase;letter-spacing:.08em;font-size:11.5px;
+}
+.monthcells{display:grid;grid-template-columns:repeat(7,1fr)}
+.monthcell{
+  aspect-ratio:1/1;min-height:52px;background:var(--card);border:0;
+  border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+  cursor:pointer;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:4px;padding:4px;position:relative;
+}
+.monthcells .monthcell:nth-child(7n){border-right:0}
+.monthcell:hover{background:#F3F7F2}
+.monthcell.out{background:#FAFAF9}
+.monthcell.out .mnum{color:#C7CDC5}
+.monthcell.today .mnum{
+  background:var(--brand-deep);color:#fff;border-radius:50%;
+  width:22px;height:22px;display:flex;align-items:center;justify-content:center;
+}
+.monthcell.selected{background:#E2EBE1;box-shadow:inset 0 0 0 2px var(--brand)}
+.mnum{font-family:var(--num);font-size:13.5px;color:var(--ink)}
+.mdots{display:flex;align-items:center;gap:4px;height:8px;font-size:0;line-height:0}
+.mdots i{
+  flex:none;display:inline-block;
+  width:6px;height:6px;min-width:6px;min-height:6px;
+  aspect-ratio:1/1;border-radius:50%;box-sizing:border-box;
+  background:var(--brand);border:1.3px solid var(--brand);
+}
+.mdots i.hollow{background:transparent;border-color:#B9C2B6}
+
+.daypanel{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 15px;
+}
+.daypanel h3{
+  margin:0 0 10px;font-family:var(--sign);font-weight:700;letter-spacing:.03em;
+  font-size:16px;color:var(--brand-deep);
+}
+.daypanel .meal{margin-bottom:8px}
+
+/* ---------- surprise me ---------- */
+.surprise{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+.reel{
+  flex:1;min-width:160px;
+  background:var(--brand-deep);color:#F2F7F3;border-radius:8px;
+  padding:9px 14px;font-size:15px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background-color .2s;
+}
+.reel.spinning{
+  color:#CFE0D6;
+  animation:reelshake .12s linear infinite;
+}
+.reel.landed{
+  background:var(--accent);color:#3A2A05;font-weight:700;
+  animation:reelpop .35s ease-out;
+}
+@keyframes reelshake{
+  0%{transform:translateY(0)}
+  50%{transform:translateY(-1.5px)}
+  100%{transform:translateY(0)}
+}
+@keyframes reelpop{
+  0%{transform:scale(.96)}
+  55%{transform:scale(1.03)}
+  100%{transform:scale(1)}
+}
+@media (prefers-reduced-motion:reduce){
+  .reel.spinning{animation:none}
+  .reel.landed{animation:none}
+}
+
+/* ---------- requesting a meal ---------- */
+.requester{
+  background:var(--card);border:1.5px dashed var(--line);border-radius:var(--r);
+  padding:14px 16px;margin-top:22px;
+}
+.reqcard{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:12px 14px;
+}
+.reqby{font-size:12.5px;color:var(--muted);white-space:nowrap}
 
 /* ---------- clickable titles and meals ---------- */
 .titlelink{

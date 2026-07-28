@@ -504,6 +504,19 @@ function spanLabel(start) {
   return `${f(start)} – ${f(end)}`;
 }
 
+/** Full weeks covering a month, so the grid never has a ragged edge. */
+function monthCells(cursor) {
+  const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const start = addDays(first, -first.getDay());
+  const last = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
+  const end = addDays(last, 6 - last.getDay());
+  const days = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) {
+    days.push({ date: d, inMonth: d.getMonth() === cursor.getMonth() });
+  }
+  return days;
+}
+
 /* ============================================================
    Grocery aggregation
    ============================================================ */
@@ -2225,16 +2238,71 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
    Add a meal to the calendar
    ============================================================ */
 
-function MealPicker({ household, recipes, recency, date, preselect, onClose, onSaved }) {
+/**
+ * Pick a recipe at random, leaning away from whatever's been cooked most
+ * recently. Not a hard exclusion — "surprise me" should still occasionally
+ * land on a favorite — just a nudge toward the pile of recipes nobody's
+ * touched in a while.
+ */
+function pickSurprise(recipes, recency) {
+  if (!recipes.length) return null;
+  const fresh = recipes.filter((r) => (recency?.get(r.id) ?? 9999) > 4);
+  const useFresh = fresh.length > 0 && Math.random() < 0.8;
+  const pool = useFresh ? fresh : recipes;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function MealPicker({ household, recipes, recency, date, preselect,
+                      presetSlot, presetServings, requestId, onClose, onSaved }) {
   const [recipeId, setRecipeId] = useState(preselect || "");
   const [when, setWhen] = useState(date || iso(new Date()));
-  const [slot, setSlot] = useState("dinner");
+  const [slot, setSlot] = useState(presetSlot || "dinner");
   const chosen = recipes.find((r) => r.id === recipeId);
-  const [servings, setServings] = useState(chosen?.servings || 4);
+  const [servings, setServings] = useState(presetServings || chosen?.servings || 4);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  const [spinning, setSpinning] = useState(false);
+  const [reelText, setReelText] = useState("");
+  const [landed, setLanded] = useState(false);
+  const spinTimer = useRef(null);
+
+  useEffect(() => () => clearTimeout(spinTimer.current), []);
+
+  const spin = () => {
+    if (spinning || !recipes.length) return;
+    const target = pickSurprise(recipes, recency);
+    if (!target) return;
+
+    setErr("");
+    setSpinning(true);
+    setLanded(false);
+
+    // A slot-machine tick: fast and random at first, slowing down, landing
+    // exactly on the chosen recipe. ~3 seconds end to end.
+    const delays = [40, 40, 50, 60, 75, 95, 120, 150, 190, 240, 300, 380, 470, 580];
+    let i = 0;
+    const tick = () => {
+      if (i < delays.length) {
+        const r = recipes[Math.floor(Math.random() * recipes.length)];
+        setReelText(r.title);
+        i++;
+        spinTimer.current = setTimeout(tick, delays[i - 1]);
+      } else {
+        setReelText(target.title);
+        setRecipeId(target.id);
+        setSpinning(false);
+        setLanded(true);
+        setTimeout(() => setLanded(false), 550);
+      }
+    };
+    tick();
+  };
+
   useEffect(() => {
+    // Don't clobber an explicit ask ("make extra, serves 6") with the
+    // recipe's own default the moment it's picked.
+    if (presetServings) return;
     const r = recipes.find((x) => x.id === recipeId);
     if (r) setServings(r.servings);
   }, [recipeId]);
@@ -2249,8 +2317,13 @@ function MealPicker({ household, recipes, recency, date, preselect, onClose, onS
       meal_slot: slot,
       servings: Number(servings) || 4,
     }).select("*, recipes(id, title, servings)").single();
+    if (error) { setBusy(false); setErr(error.message); return; }
+    if (requestId) {
+      // Fulfilled, so it comes out of the queue. Not fatal if this part
+      // fails — the meal itself is already safely saved.
+      await sb.from("meal_requests").delete().eq("id", requestId);
+    }
     setBusy(false);
-    if (error) { setErr(error.message); return; }
     onSaved(thenAdjust ? data : null);
   };
 
@@ -2263,12 +2336,31 @@ function MealPicker({ household, recipes, recency, date, preselect, onClose, onS
   }
 
   return html`
-    <${Sheet} title="Add a meal" onClose=${onClose}>
+    <${Sheet} title=${requestId ? "Fulfill the request" : "Add a meal"} onClose=${onClose}>
+      ${requestId && !preselect && html`
+        <div class="notice" style="margin-bottom:14px">
+          This request wasn't linked to a recipe. Pick one below, or add it
+          on the Recipes tab first if it doesn't exist yet.
+        </div>`}
       <label class="field" style="margin-bottom:6px">
         <span>Recipe</span>
       </label>
       <${RecipePicker} recipes=${recipes} recency=${recency} value=${recipeId}
         onPick=${(r) => setRecipeId(r.id)} />
+
+      <div class="surprise">
+        <button class="btn ghost sm" disabled=${spinning} onClick=${spin}>
+          🎲 ${spinning ? "Spinning…" : "Surprise me"}
+        </button>
+        ${reelText && html`
+          <div class=${"reel" + (spinning ? " spinning" : "") + (landed ? " landed" : "")}>
+            ${reelText}
+          </div>`}
+      </div>
+      ${!reelText && html`
+        <p class="small muted" style="margin:6px 0 0">
+          Leans toward things you haven't had in a while.
+        </p>`}
 
       <div class="row wrap" style="gap:12px;margin-top:18px">
         <label class="field" style="margin:0;flex:1;min-width:150px">
@@ -2308,19 +2400,209 @@ function MealPicker({ household, recipes, recency, date, preselect, onClose, onS
 }
 
 /* ============================================================
+   Requesting a meal — lighter than planning one. No recipe required,
+   no day required. Sits in a shared queue until someone turns it into
+   a real entry on the calendar, at which point the request disappears
+   rather than lingering as a second source of truth.
+   ============================================================ */
+
+function RequestComposer({ household, recipes, recency, onAdded }) {
+  const [title, setTitle] = useState("");
+  const [linked, setLinked] = useState(null);
+  const [showLink, setShowLink] = useState(false);
+  const [showWhen, setShowWhen] = useState(false);
+  const [when, setWhen] = useState("");
+  const [slot, setSlot] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const reset = () => {
+    setTitle(""); setLinked(null); setShowLink(false);
+    setShowWhen(false); setWhen(""); setSlot(""); setNote("");
+  };
+
+  const submit = async () => {
+    const text = (linked?.title || title).trim();
+    if (!text) { setErr("Say what you're asking for."); return; }
+    setBusy(true); setErr("");
+    const { error } = await sb.from("meal_requests").insert({
+      household_id: household.id,
+      recipe_id: linked?.id || null,
+      title: text,
+      requested_for: when || null,
+      meal_slot: slot || null,
+      note: note.trim() || null,
+    });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    reset();
+    onAdded();
+  };
+
+  return html`
+    <div class="requester">
+      <div class="row wrap" style="gap:10px">
+        <input type="text" value=${title} style="flex:1;min-width:200px"
+          placeholder="Request something — “tacos”, “grandma's lasagna”…"
+          onInput=${(e) => { setTitle(e.target.value); if (linked) setLinked(null); }}
+          onKeyDown=${(e) => e.key === "Enter" && !e.shiftKey && submit()} />
+        <button class="btn sm" disabled=${busy} onClick=${submit}>
+          ${busy ? "Asking…" : "Ask for it"}
+        </button>
+      </div>
+
+      <div class="row wrap" style="margin-top:8px;gap:14px">
+        <button class="btn quiet" onClick=${() => setShowWhen(!showWhen)}>
+          ${when || slot ? "Change day / meal" : "For a particular day?"}
+        </button>
+        <button class="btn quiet" onClick=${() => setShowLink(!showLink)}>
+          ${linked ? `Linked: ${linked.title}` : "Already have this recipe?"}
+        </button>
+      </div>
+
+      ${showWhen && html`
+        <div class="row wrap" style="margin-top:10px;gap:12px">
+          <label class="field" style="margin:0">
+            <span>Day</span>
+            <input type="date" value=${when} onInput=${(e) => setWhen(e.target.value)} />
+          </label>
+          <label class="field" style="margin:0">
+            <span>Meal</span>
+            <select value=${slot} onChange=${(e) => setSlot(e.target.value)}>
+              <option value="">Any</option>
+              ${SLOTS.map((s) => html`<option value=${s}>${s}</option>`)}
+            </select>
+          </label>
+          <label class="field" style="margin:0;flex:1;min-width:160px">
+            <span>Note</span>
+            <input type="text" value=${note} placeholder="no mushrooms please"
+              onInput=${(e) => setNote(e.target.value)} />
+          </label>
+        </div>`}
+
+      ${showLink && html`
+        <div style="margin-top:10px;max-width:420px">
+          <${RecipePicker} recipes=${recipes} recency=${recency} value=${linked?.id}
+            onPick=${(r) => { setLinked(r); setShowLink(false); }} />
+        </div>`}
+
+      <${Problem} text=${err} />
+    </div>`;
+}
+
+function RequestQueue({ requests, onClaim, onDismiss }) {
+  if (!requests.length) return null;
+
+  return html`
+    <div style="margin-top:26px">
+      <h2 class="sign" style="font-size:17px;margin:0 0 10px">
+        Requested (${requests.length})
+      </h2>
+      <div class="stack">
+        ${requests.map((r) => html`
+          <div class="reqcard" key=${r.id}>
+            <div class="row wrap" style="gap:8px">
+              <strong style="font-size:15.5px">${r.recipes?.title || r.title}</strong>
+              ${r.requested_for && html`
+                <span class="pill">${fromIso(r.requested_for).toLocaleDateString(
+                  undefined, { weekday: "short", month: "short", day: "numeric" })}</span>`}
+              ${r.meal_slot && html`<span class="pill">${r.meal_slot}</span>`}
+              <span class="spacer"></span>
+              <span class="reqby">asked by ${r.requested_by_name || "someone"}</span>
+            </div>
+            ${r.note && html`<p class="small muted" style="margin:6px 0 0">${r.note}</p>`}
+            <div class="row" style="margin-top:10px">
+              <button class="btn sm" onClick=${() => onClaim(r)}>Add to plan</button>
+              <button class="btn quiet" onClick=${() => onDismiss(r)}>Dismiss</button>
+            </div>
+          </div>`)}
+      </div>
+    </div>`;
+}
+
+/** One planned meal, however it's shown — a week card or the day panel. */
+function MealRow({ m, recipes, onOpen, onRemove }) {
+  return html`
+    <div class="meal">
+      <button class="kill" title="Remove" onClick=${() => onRemove(m.id)}>×</button>
+      <button class="mealopen"
+        onClick=${() => onOpen(recipes.find((r) => r.id === m.recipe_id), m)}>
+        <span class="slot">${m.meal_slot}</span>
+        <span class="mealname">${m.recipes?.title || "—"}</span>
+        <span class="srv">${m.servings} servings</span>
+      </button>
+    </div>`;
+}
+
+const DOT_SLOTS = ["breakfast", "lunch", "dinner"];
+
+/* ============================================================
    Plan tab
    ============================================================ */
 
 function PlanTab({ household, recipes, recency, meals, week, setWeek, reload,
-                  onOpen, planThis, onPlanned }) {
+                  onOpen, planThis, onPlanned, requests, reloadRequests }) {
   const [picker, setPicker] = useState(null);
   const today = iso(new Date());
+
+  const [calView, setCalView] = useState(
+    () => localStorage.getItem("sm-plan-view") || "week");
+  const setCalViewSticky = (v) => {
+    setCalView(v);
+    try { localStorage.setItem("sm-plan-view", v); } catch { /* private mode */ }
+  };
+
+  const [monthCursor, setMonthCursor] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const [selectedDay, setSelectedDay] = useState(today);
+  const [monthMeals, setMonthMeals] = useState([]);
+  const [monthLoading, setMonthLoading] = useState(false);
+
+  const cells = useMemo(() => monthCells(monthCursor), [monthCursor]);
+
+  const fetchMonth = useCallback(async () => {
+    if (calView !== "month" || !cells.length) return;
+    setMonthLoading(true);
+    const { data, error } = await sb.from("meal_plan")
+      .select("*, recipes(id, title, servings)")
+      .eq("household_id", household.id)
+      .gte("scheduled_on", iso(cells[0].date))
+      .lte("scheduled_on", iso(cells[cells.length - 1].date));
+    setMonthLoading(false);
+    if (!error) setMonthMeals(data || []);
+  }, [household.id, calView, cells]);
+
+  useEffect(() => { fetchMonth(); }, [fetchMonth]);
+  // `meals` only changes when the week view's own load() runs, which
+  // happens on every realtime meal_plan change for the household — reused
+  // here purely as a "something changed, refetch" signal for month view,
+  // rather than standing up a second realtime subscription for the same
+  // table.
+  useEffect(() => { if (calView === "month") fetchMonth(); }, [meals]);
 
   useEffect(() => {
     if (!planThis) return;
     setPicker({ date: today, recipeId: planThis.id });
     onPlanned?.();
   }, [planThis]);
+
+  const claim = (req) => {
+    setPicker({
+      date: req.requested_for || today,
+      recipeId: req.recipe_id || "",
+      slot: req.meal_slot || "dinner",
+      servings: req.servings || undefined,
+      requestId: req.id,
+    });
+  };
+
+  const dismiss = async (req) => {
+    await sb.from("meal_requests").delete().eq("id", req.id);
+    reloadRequests();
+  };
 
   const byDay = useMemo(() => {
     const m = new Map();
@@ -2334,56 +2616,138 @@ function PlanTab({ household, recipes, recency, meals, week, setWeek, reload,
     return m;
   }, [meals]);
 
+  const byDayMonth = useMemo(() => {
+    const m = new Map();
+    for (const meal of monthMeals) {
+      if (!m.has(meal.scheduled_on)) m.set(meal.scheduled_on, []);
+      m.get(meal.scheduled_on).push(meal);
+    }
+    for (const list of m.values()) {
+      list.sort((a, b) => SLOTS.indexOf(a.meal_slot) - SLOTS.indexOf(b.meal_slot));
+    }
+    return m;
+  }, [monthMeals]);
+
   const remove = async (id) => {
     await sb.from("meal_plan").delete().eq("id", id);
     reload();
+    if (calView === "month") fetchMonth();
   };
+
+  const pickCell = (cell) => {
+    setSelectedDay(iso(cell.date));
+    if (!cell.inMonth) {
+      setMonthCursor(new Date(cell.date.getFullYear(), cell.date.getMonth(), 1));
+    }
+  };
+
+  const monthLabel = monthCursor.toLocaleDateString(
+    undefined, { month: "long", year: "numeric" });
+  const selectedMeals = byDayMonth.get(selectedDay) || [];
+  const selectedLabel = fromIso(selectedDay).toLocaleDateString(
+    undefined, { weekday: "long", month: "long", day: "numeric" });
 
   return html`
     <div>
       <div class="weeknav">
-        <button onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
-        <button onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
-        <span class="label">${spanLabel(week)}</span>
+        ${calView === "week"
+          ? html`
+            <button class="navarrow" onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
+            <button class="navarrow" onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
+            <span class="label">${spanLabel(week)}</span>`
+          : html`
+            <button class="navarrow" onClick=${() =>
+              setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() - 1, 1))}
+              aria-label="Previous month">‹</button>
+            <button class="navarrow" onClick=${() =>
+              setMonthCursor(new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 1))}
+              aria-label="Next month">›</button>
+            <span class="label">${monthLabel}</span>`}
+        <span class="spacer"></span>
+        <button class=${"btn sm " + (calView === "week" ? "" : "ghost")}
+          onClick=${() => setCalViewSticky("week")}>Week</button>
+        <button class=${"btn sm " + (calView === "month" ? "" : "ghost")}
+          onClick=${() => setCalViewSticky("month")}>Month</button>
       </div>
 
-      <div class="days">
-        ${[0, 1, 2, 3, 4, 5, 6].map((i) => {
-          const d = addDays(week, i);
-          const key = iso(d);
-          const list = byDay.get(key) || [];
-          return html`
-            <div class=${"day" + (key === today ? " today" : "")} key=${key}>
-              <div>
-                <span class="dow">${DOW[d.getDay()]}</span>
-                <span class="dnum">${d.getDate()}</span>
-              </div>
-              ${list.map((m) => html`
-                <div class="meal" key=${m.id}>
-                  <button class="kill" title="Remove"
-                    onClick=${() => remove(m.id)}>×</button>
-                  <button class="mealopen"
-                    onClick=${() => onOpen(recipes.find((r) => r.id === m.recipe_id), m)}>
-                    <span class="slot">${m.meal_slot}</span>
-                    <span class="mealname">${m.recipes?.title || "—"}</span>
-                    <span class="srv">${m.servings} servings</span>
-                  </button>
-                </div>`)}
-              <button class="add" onClick=${() => setPicker({ date: key })}>+ meal</button>
-            </div>`;
-        })}
-      </div>
+      ${calView === "week" ? html`
+        <div class="days">
+          ${[0, 1, 2, 3, 4, 5, 6].map((i) => {
+            const d = addDays(week, i);
+            const key = iso(d);
+            const list = byDay.get(key) || [];
+            return html`
+              <div class=${"day" + (key === today ? " today" : "")} key=${key}>
+                <div>
+                  <span class="dow">${DOW[d.getDay()]}</span>
+                  <span class="dnum">${d.getDate()}</span>
+                </div>
+                ${list.map((m) => html`<${MealRow} m=${m} recipes=${recipes}
+                  onOpen=${onOpen} onRemove=${remove} key=${m.id} />`)}
+                <button class="add" onClick=${() => setPicker({ date: key })}>+ meal</button>
+              </div>`;
+          })}
+        </div>`
+        : html`
+        <div class="monthwrap">
+          <div class="monthgrid">
+            <div class="monthdow">
+              ${DOW.map((d) => html`<span key=${d}>${d}</span>`)}
+            </div>
+            <div class="monthcells">
+              ${cells.map((cell) => {
+                const key = iso(cell.date);
+                const list = byDayMonth.get(key) || [];
+                return html`
+                  <button type="button" key=${key}
+                    class=${"monthcell"
+                      + (cell.inMonth ? "" : " out")
+                      + (key === today ? " today" : "")
+                      + (key === selectedDay ? " selected" : "")}
+                    onClick=${() => pickCell(cell)}>
+                    <span class="mnum">${cell.date.getDate()}</span>
+                    ${list.length > 0 && html`
+                      <span class="mdots">
+                        ${DOT_SLOTS.map((s) => html`
+                          <i key=${s} class=${list.some((m) => m.meal_slot === s) ? "" : "hollow"}
+                            title=${s}></i>`)}
+                      </span>`}
+                  </button>`;
+              })}
+            </div>
+          </div>
+
+          <div class="daypanel">
+            <h3>${selectedLabel}</h3>
+            ${monthLoading && !selectedMeals.length
+              ? html`<p class="small muted">Loading…</p>`
+              : !selectedMeals.length
+                ? html`<p class="small muted" style="margin:4px 0 14px">Nothing planned.</p>`
+                : selectedMeals.map((m) => html`<${MealRow} m=${m} recipes=${recipes}
+                    onOpen=${onOpen} onRemove=${remove} key=${m.id} />`)}
+            <button class="add" style="margin-top:10px"
+              onClick=${() => setPicker({ date: selectedDay })}>+ meal</button>
+          </div>
+        </div>`}
 
       ${picker && html`<${MealPicker} household=${household} recipes=${recipes}
         recency=${recency} date=${picker.date} preselect=${picker.recipeId}
+        presetSlot=${picker.slot} presetServings=${picker.servings}
+        requestId=${picker.requestId}
         onClose=${() => setPicker(null)}
         onSaved=${(created) => {
           setPicker(null);
           reload();
+          reloadRequests();
+          if (calView === "month") fetchMonth();
           if (created) {
             onOpen(recipes.find((r) => r.id === created.recipe_id), created, true);
           }
         }} />`}
+
+      <${RequestComposer} household=${household} recipes=${recipes}
+        recency=${recency} onAdded=${reloadRequests} />
+      <${RequestQueue} requests=${requests} onClaim=${claim} onDismiss=${dismiss} />
     </div>`;
 }
 
@@ -2605,8 +2969,8 @@ function ListTab({ household, week, setWeek, needs, saved, pantry, aisles, reloa
   return html`
     <div>
       <div class="weeknav">
-        <button onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
-        <button onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
+        <button class="navarrow" onClick=${() => setWeek(addDays(week, -7))} aria-label="Previous week">‹</button>
+        <button class="navarrow" onClick=${() => setWeek(addDays(week, 7))} aria-label="Next week">›</button>
         <span class="label">${spanLabel(week)}</span>
       </div>
 
@@ -2712,6 +3076,7 @@ function App() {
   const [pantry, setPantry] = useState(() => new Map());
   const [locations, setLocations] = useState([]);
   const [recency, setRecency] = useState(() => new Map());
+  const [requests, setRequests] = useState([]);
   const [fault, setFault] = useState("");
 
   /* --- session --- */
@@ -2744,7 +3109,7 @@ function App() {
     const from = iso(week);
     const to = iso(addDays(week, 6));
 
-    const [r, l, c, a, m, n, s, p, h, pl] = await Promise.all([
+    const [r, l, c, a, m, n, s, p, h, pl, rq] = await Promise.all([
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
         .eq("household_id", household.id).order("title"),
       sb.from("recipes").select("*, recipe_ingredients(*, ingredients(*))")
@@ -2764,9 +3129,13 @@ function App() {
         .order("scheduled_on", { ascending: false }).limit(120),
       sb.from("pantry_locations").select("*")
         .eq("household_id", household.id).order("sort_order"),
+      sb.from("meal_requests").select("*, recipes(id, title, servings)")
+        .eq("household_id", household.id)
+        .order("requested_for", { ascending: true, nullsFirst: false })
+        .order("created_at", { ascending: true }),
     ]);
 
-    const bad = [r, l, c, a, m, n, s, p, h, pl].find((x) => x.error);
+    const bad = [r, l, c, a, m, n, s, p, h, pl, rq].find((x) => x.error);
     if (bad) { setFault(bad.error.message); return; }
     setFault("");
     setRecipes(r.data || []);
@@ -2778,6 +3147,7 @@ function App() {
     setSaved(s.data || []);
     setPantry(new Map((p.data || []).map((x) => [x.ingredient_id, x])));
     setLocations(pl.data || []);
+    setRequests(rq.data || []);
 
     // Rank by how recently each recipe was last on the calendar, so the
     // picker opens on what this household actually cooks.
@@ -2808,6 +3178,9 @@ function App() {
       .on("postgres_changes",
         { event: "*", schema: "public", table: "pantry_locations",
           filter: `household_id=eq.${household.id}` }, load)
+      .on("postgres_changes",
+        { event: "*", schema: "public", table: "meal_requests",
+          filter: `household_id=eq.${household.id}` }, load)
       .subscribe();
     return () => { sb.removeChannel(ch); };
   }, [household, load]);
@@ -2834,7 +3207,9 @@ function App() {
       </div>
 
       <nav class="tabs four">
-        <button aria-current=${String(tab === "plan")} onClick=${() => setTab("plan")}>Plan</button>
+        <button aria-current=${String(tab === "plan")} onClick=${() => setTab("plan")}>
+          Plan${requests.length ? html`<span class="badge">${requests.length}</span>` : null}
+        </button>
         <button aria-current=${String(tab === "recipes")} onClick=${() => setTab("recipes")}>Recipes</button>
         <button aria-current=${String(tab === "pantry")} onClick=${() => setTab("pantry")}>Pantry</button>
         <button aria-current=${String(tab === "list")} onClick=${() => setTab("list")}>
@@ -2849,6 +3224,7 @@ function App() {
           recipes=${recipes} recency=${recency} meals=${meals}
           week=${week} setWeek=${setWeek} reload=${load}
           planThis=${planThis} onPlanned=${() => setPlanThis(null)}
+          requests=${requests} reloadRequests=${load}
           onOpen=${(r, m, adjust) => r
             && setViewing({ recipe: r, own: true, meal: m, adjust })} />`}
 
