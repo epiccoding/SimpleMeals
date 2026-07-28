@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SimpleMeals</title>
 <meta name="theme-color" content="#14503A">
+
+<!-- PWA: makes the app installable (Chrome's "Add to Home Screen" /
+     the install icon in the address bar), and is the same foundation
+     Bubblewrap wraps into a real Play Store package later. -->
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icons/favicon.png">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SimpleMeals">
+<meta name="mobile-web-app-capable" content="yes">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -549,34 +561,66 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 
 /* ---------- pantry: table view ---------- */
 .tablewrap{overflow-x:auto;margin:2px 0 6px;border:1px solid var(--line);border-radius:var(--r)}
-.pantable{width:100%;border-collapse:collapse;font-size:14px}
+.pantable{width:100%;min-width:640px;border-collapse:collapse;table-layout:fixed;font-size:14px}
+
+.col-item{width:26%}
+.col-qty{width:26%}
+.col-bucket{width:16%}
+.col-when{width:16%}
+.col-status{width:12%}
+.col-x{width:36px}
+
 .pantable thead th{
   text-align:left;font-family:var(--sign);font-weight:600;text-transform:uppercase;
   letter-spacing:.06em;font-size:11px;color:var(--muted);
-  padding:8px 10px;border-bottom:1.5px solid var(--line);white-space:nowrap;
+  padding:9px 10px;border-bottom:1.5px solid var(--line);white-space:nowrap;
   background:var(--tint);
 }
-.pantable td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-.pantable tr:last-child td{border-bottom:0}
-.pantable tbody tr{position:relative}
-.pantable tbody tr::before{
-  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:var(--status-plenty);
+.pantable thead th:nth-child(5){text-align:center} /* Status header, matches centered buttons */
+
+.pantable td{
+  padding:8px 10px;border-bottom:1px solid var(--line);
+  vertical-align:middle;
 }
-.pantable tr.tr-low::before{background:var(--status-low)}
-.pantable tr.tr-out::before{background:var(--status-out)}
-.pantable tr:hover{background:var(--tint)}
+.pantable tr:last-child td{border-bottom:0}
+.pantable tbody tr:hover{background:var(--tint)}
+
+/* The status color lives on a real border, not an absolutely-positioned
+   pseudo-element — <tr> gives unreliable support for that across
+   browsers, which is why the colored edge wasn't actually showing up
+   before despite being in the CSS. A border on the first real cell
+   always renders. */
+.tblstatusedge{border-left:3px solid var(--status-plenty)}
+.tbl-low.tblstatusedge{border-left-color:var(--status-low)}
+.tbl-out.tblstatusedge{border-left-color:var(--status-out)}
+
 .tblname{
   background:none;border:0;padding:0;font:inherit;font-weight:500;
-  color:var(--ink);cursor:pointer;text-align:left;white-space:nowrap;
+  color:var(--ink);cursor:pointer;text-align:left;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;
+  display:block;
 }
 .tblname:hover{color:var(--brand-text);text-decoration:underline}
-.tblqty{width:64px;padding:5px 7px;font-size:13.5px;text-align:center;font-family:var(--num)}
-.tblunit{padding:5px 6px;font-size:13px;min-width:88px}
+
+.tblqtypair{display:flex;gap:6px;align-items:center}
+/* Chained with the parent class so this reliably beats the app-wide
+   input/select rule that sets width:100% on every text field — a plain
+   .tblqty class alone loses that fight on specificity, which is exactly
+   why these were stacking full-width instead of sitting side by side. */
+.tblqtypair input.tblqty{
+  width:56px;flex:0 0 56px;padding:6px 7px;font-size:13.5px;
+  text-align:center;font-family:var(--num);
+}
+.tblqtypair select.tblunit{
+  flex:1 1 auto;width:auto;min-width:64px;padding:6px 7px;font-size:13px;
+}
+.tblbucket{width:100%;padding:6px 7px;font-size:13px}
+
 .tblwhen{white-space:nowrap;font-size:12px}
-.tblstatusbtns{display:flex;gap:3px}
+
+.tblstatusbtns{display:flex;gap:3px;justify-content:center}
 .tblstatusdot{
-  width:24px;height:24px;border-radius:6px;border:1.5px solid var(--line);
+  width:24px;height:24px;flex:none;border-radius:6px;border:1.5px solid var(--line);
   background:var(--card);color:var(--muted);cursor:pointer;
   font-family:var(--sign);font-weight:700;font-size:11px;line-height:1;
 }
@@ -586,6 +630,11 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 .tblstatusdot.out.on{background:var(--status-out);border-color:var(--status-out);color:#fff}
 
 /* ---------- pantry: buckets ---------- */
+.bulkbar{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  margin:10px 0 4px;padding:11px 14px;
+  background:var(--tint-amber);border-radius:var(--r);
+}
 .bucket{
   border-radius:var(--r);transition:background-color .12s;
   padding:2px;margin:0 -2px;
@@ -882,5 +931,15 @@ textarea{min-height:110px;resize:vertical;line-height:1.5}
 <body>
 <div id="root"><div class="spin">Loading…</div></div>
 <script type="module" src="./app.js"></script>
+<script>
+  // Registered after load so it never competes with the app itself for
+  // the connection on first visit. Safe to no-op — older/unsupported
+  // browsers just skip installability and keep working as a normal site.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => { /* fine either way */ });
+    });
+  }
+</script>
 </body>
 </html>

@@ -877,6 +877,50 @@ function Onboard({ onReady }) {
 }
 
 /**
+ * Add one or more items to this week's shopping list as manual entries —
+ * the same mechanism as the List tab's plain "add by hand" box, just
+ * pre-filled from a pantry item's name and known amount. Always targets
+ * *this* week (today's), regardless of which week someone happens to be
+ * browsing elsewhere, since "I'm out, buy it" means the next trip, not
+ * whatever week the Plan tab is currently scrolled to.
+ *
+ * Checks what's already on this week's hand-added list first and skips
+ * exact name matches, so clicking either the per-item or the bulk
+ * "add out/low" button twice can't quietly double an entry.
+ */
+async function addToShoppingList(household, entries) {
+  if (!entries.length) return { added: 0, skipped: 0 };
+  const week = iso(weekStart(new Date()));
+
+  const { data: existing, error: readErr } = await sb.from("list_items")
+    .select("custom_name")
+    .eq("household_id", household.id)
+    .eq("week_start", week)
+    .eq("is_manual", true);
+  if (readErr) throw readErr;
+
+  const already = new Set(
+    (existing || []).map((r) => (r.custom_name || "").trim().toLowerCase()));
+
+  const rows = entries
+    .filter((e) => !already.has(e.name.trim().toLowerCase()))
+    .map((e) => ({
+      household_id: household.id,
+      week_start: week,
+      custom_name: e.name,
+      quantity: e.qty ?? null,
+      unit: e.unit || null,
+      is_manual: true,
+    }));
+
+  if (rows.length) {
+    const { error } = await sb.from("list_items").insert(rows);
+    if (error) throw error;
+  }
+  return { added: rows.length, skipped: entries.length - rows.length };
+}
+
+/**
  * Record a plain-English line in the household's activity log. Fire and
  * forget — a logging failure must never break the action it's attached
  * to, so errors are swallowed rather than surfaced.
@@ -1898,10 +1942,22 @@ function RecipePicker({ recipes, recency, value, onPick }) {
    conversion editor is one click further, since that's rarer to need.
    ============================================================ */
 
-function PantryQuickEdit({ item, buckets, onClose, onFix, onStatus, onAmount,
-                          onUnit, onDrop, onLocation }) {
+function PantryQuickEdit({ item, buckets, household, onClose, onFix, onStatus,
+                          onAmount, onUnit, onDrop, onLocation }) {
   const [qty, setQty] = useState(item.quantity ?? "");
   const [unit, setUnit] = useState(item.unit || "");
+  const [listState, setListState] = useState("idle"); // idle | busy | added | error
+
+  const addOne = async () => {
+    setListState("busy");
+    try {
+      const { added } = await addToShoppingList(household,
+        [{ name: item.ing.name, qty: item.quantity, unit: item.unit }]);
+      setListState(added ? "added" : "already");
+    } catch {
+      setListState("error");
+    }
+  };
 
   return html`
     <${Sheet} title=${item.ing.name} onClose=${onClose}>
@@ -1942,7 +1998,21 @@ function PantryQuickEdit({ item, buckets, onClose, onFix, onStatus, onAmount,
         </label>
       </div>
 
-      <div class="row" style="margin-top:20px">
+      <div class="row" style="margin-top:18px">
+        <button class="btn" disabled=${listState === "busy" || listState === "added"}
+          onClick=${addOne}>
+          ${listState === "added" ? "✓ Added to shopping list"
+            : listState === "already" ? "Already on your list"
+            : listState === "busy" ? "Adding…"
+            : "Add to shopping list"}
+        </button>
+      </div>
+      ${listState === "error" && html`
+        <p class="small" style="color:var(--danger);margin-top:6px">
+          Couldn't add that — try again.
+        </p>`}
+
+      <div class="row" style="margin-top:16px">
         <button class="btn ghost sm" onClick=${() => onFix(item)}>
           Rename, change aisle, or fix conversion
         </button>
@@ -2344,6 +2414,9 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
     try { localStorage.setItem("sm-pantry-sort", v); } catch { /* private mode */ }
   };
 
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState("");
+
   const STATUS_RANK = { out: 0, low: 1, plenty: 2 };
   const sortRows = (rows) => {
     const arr = [...rows];
@@ -2368,6 +2441,36 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
     const q = search.trim().toLowerCase();
     return q ? list.filter((p) => p.ing.name.toLowerCase().includes(q)) : list;
   }, [pantry, catalog, search]);
+
+  // Deliberately NOT derived from `items` — that's filtered by whatever's
+  // typed in the search box, and "add everything out/low" should mean
+  // the whole pantry regardless of what someone happens to be searching
+  // for at the moment.
+  const needsAttention = useMemo(() =>
+    [...pantry.values()]
+      .map((p) => ({ ...p, ing: catalog.find((c) => c.id === p.ingredient_id) }))
+      .filter((p) => p.ing && p.status !== "plenty"),
+    [pantry, catalog]);
+
+  const bulkAddNeeded = async () => {
+    setBulkAdding(true); setBulkMsg("");
+    try {
+      const { added, skipped } = await addToShoppingList(household,
+        needsAttention.map((i) => ({ name: i.ing.name, qty: i.quantity, unit: i.unit })));
+      setBulkMsg(
+        added
+          ? `Added ${added} to your shopping list${skipped ? ` (${skipped} already there)` : ""}.`
+          : "Already all on your list.");
+      if (added) {
+        logActivity(household,
+          `sent ${added} out/low pantry item${added === 1 ? "" : "s"} to the shopping list`);
+      }
+    } catch (e) {
+      setBulkMsg(e.message || "Couldn't add those — try again.");
+    } finally {
+      setBulkAdding(false);
+    }
+  };
 
   // "Other" is never a physical row — it's synthesized so it can never be
   // deleted or duplicated, and it's always the last bucket.
@@ -2577,6 +2680,16 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
           onCreate=${(v) => add(v)} />
         <${Problem} text=${err} />
 
+        ${needsAttention.length > 0 && html`
+          <div class="bulkbar">
+            <button class="btn" disabled=${bulkAdding} onClick=${bulkAddNeeded}>
+              🛒 ${bulkAdding
+                ? "Adding…"
+                : `Add all ${needsAttention.length} out/low to shopping list`}
+            </button>
+            ${bulkMsg && html`<span class="small muted">${bulkMsg}</span>`}
+          </div>`}
+
         ${pantry.size > 8 && html`
           <input class="picksearch" type="text" value=${search}
             placeholder="Find something in the pantry"
@@ -2656,53 +2769,63 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
                     ? html`
                       <div class="tablewrap">
                         <table class="pantable">
+                          <colgroup>
+                            <col class="col-item" />
+                            <col class="col-qty" />
+                            <col class="col-bucket" />
+                            <col class="col-when" />
+                            <col class="col-status" />
+                            <col class="col-x" />
+                          </colgroup>
                           <thead>
                             <tr>
                               <th>Item</th>
                               <th>Amount</th>
-                              <th>Unit</th>
                               <th>Bucket</th>
                               <th>Confirmed</th>
-                              <th colspan="2">Status</th>
+                              <th>Status</th>
+                              <th></th>
                             </tr>
                           </thead>
                           <tbody>
                             ${rows.map((it) => html`
-                              <tr class=${"tr-" + it.status} key=${it.id}>
-                                <td>
+                              <tr key=${it.id}>
+                                <td class=${"tblstatusedge tbl-" + it.status}>
                                   <button class="tblname" onClick=${() => setFixing(it)}>
                                     ${it.ing.name}
                                   </button>
                                 </td>
                                 <td>
-                                  <input class="tblqty" type="text" value=${it.quantity ?? ""}
-                                    placeholder="—"
-                                    onBlur=${(e) => setAmount(it, e.target.value)}
-                                    onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                                  <div class="tblqtypair">
+                                    <input class="tblqty" type="text" value=${it.quantity ?? ""}
+                                      placeholder="—"
+                                      onBlur=${(e) => setAmount(it, e.target.value)}
+                                      onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+                                    <select class="tblunit" value=${it.unit || ""}
+                                      onChange=${(e) => setUnit(it, e.target.value || null)}>
+                                      <option value="">—</option>
+                                      ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
+                                    </select>
+                                  </div>
                                 </td>
                                 <td>
-                                  <select class="tblunit" value=${it.unit || ""}
-                                    onChange=${(e) => setUnit(it, e.target.value || null)}>
-                                    <option value="">—</option>
-                                    ${UNITS.map((u) => html`<option value=${u}>${u}</option>`)}
-                                  </select>
-                                </td>
-                                <td>
-                                  <select class="tblunit" value=${it.location || "Other"}
+                                  <select class="tblbucket" value=${it.location || "Other"}
                                     onChange=${(e) => setLocation(it, e.target.value)}>
                                     ${bucketNames.map((b) => html`<option value=${b}>${b}</option>`)}
                                   </select>
                                 </td>
                                 <td class="tblwhen small muted">${relTime(it.updated_at)}</td>
-                                <td class="tblstatusbtns">
-                                  ${STATUS.map((s) => html`
-                                    <button
-                                      class=${"tblstatusdot " + s.key
-                                        + (it.status === s.key ? " on" : "")}
-                                      title=${s.label}
-                                      onClick=${() => setStatus(it, s.key)}>
-                                      ${s.label[0].toUpperCase()}
-                                    </button>`)}
+                                <td>
+                                  <span class="tblstatusbtns">
+                                    ${STATUS.map((s) => html`
+                                      <button
+                                        class=${"tblstatusdot " + s.key
+                                          + (it.status === s.key ? " on" : "")}
+                                        title=${s.label}
+                                        onClick=${() => setStatus(it, s.key)}>
+                                        ${s.label[0].toUpperCase()}
+                                      </button>`)}
+                                  </span>
                                 </td>
                                 <td>
                                   <button class="btn quiet" title="Take out of the pantry"
@@ -2764,6 +2887,7 @@ function PantryTab({ household, pantry, catalog, locations, recipes, recency,
       `}
 
       ${liveDetail && html`<${PantryQuickEdit} item=${liveDetail} buckets=${bucketNames}
+        household=${household}
         onClose=${() => setDetail(null)}
         onFix=${(it) => { setDetail(null); setFixing(it); }}
         onStatus=${setStatus} onAmount=${setAmount} onUnit=${setUnit}
